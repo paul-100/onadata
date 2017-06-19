@@ -49,7 +49,8 @@ from onadata.apps.logger.xform_instance_parser import (
     get_deprecated_uuid_from_xml,
     get_submission_date_from_xml)
 from onadata.apps.viewer.models.data_dictionary import DataDictionary
-from onadata.apps.viewer.models.parsed_instance import ParsedInstance
+from onadata.apps.viewer.models.parsed_instance import (
+    ParsedInstance, call_webhooks)
 from onadata.libs.utils.model_tools import set_uuid
 from onadata.libs.utils.user_auth import get_user_default_project
 
@@ -88,6 +89,9 @@ def _get_instance(xml, new_uuid, submitted_by, status, xform):
             instance.last_edited = last_edited
             instance.uuid = new_uuid
             instance.save()
+
+            # call webhooks
+            call_webhooks(instance.pk)
         elif history:
             instance = history.xform_instance
     if old_uuid is None or (instance is None and history is None):
@@ -120,7 +124,8 @@ def get_xform_from_submission(xml, username, uuid=None):
 
     if uuid:
         # try find the form by its uuid which is the ideal condition
-        if XForm.objects.filter(uuid=uuid).count() > 0:
+        if XForm.objects.filter(uuid=uuid,
+                                deleted_at__isnull=True).count() > 0:
             xform = XForm.objects.get(uuid=uuid)
 
             return xform
@@ -129,7 +134,8 @@ def get_xform_from_submission(xml, username, uuid=None):
 
     try:
         return get_object_or_404(XForm, id_string__iexact=id_string,
-                                 user__username=username)
+                                 user__username=username,
+                                 deleted_at__isnull=True)
     except MultipleObjectsReturned:
         raise NonUniqueFormIdError()
 
@@ -218,9 +224,8 @@ def save_submission(xform, xml, media_files, new_uuid, submitted_by, status,
         instance.save()
         pi, created = ParsedInstance.objects.get_or_create(
             instance=instance)
-
-    if not created:
-        pi.save(async=False)
+        if not created:
+            pi.save(async=False)
 
     return instance
 
@@ -229,7 +234,7 @@ def get_filtered_instances(*args, **kwargs):
     """Get filtered instances - mainly to allow mocking in tests"""
 
     return Instance.objects.filter(*args, **kwargs)\
-        .select_related(
+        .select_related('user', 'xform__user').only(
             'user__username',
             'xform__user__username',
             'xform__has_start_time'
@@ -464,19 +469,6 @@ def publish_form(callback):
             'type': 'alert-error',
             'text': _(u'Form with this id or SMS-keyword already exists.'),
         }
-    except ValidationError as e:
-        # on clone invalid URL
-        return {
-            'type': 'alert-error',
-            'text': _(u'Invalid URL format.'),
-        }
-    except AttributeError as e:
-        # form.publish returned None, not sure why...
-
-        return {
-            'type': 'alert-error',
-            'text': unicode(e)
-        }
     except ProcessTimedOut as e:
         # catch timeout errors
         return {
@@ -491,9 +483,7 @@ def publish_form(callback):
                 'Please try again.'
             )),
         }
-    except Exception as e:
-        # error in the XLS file; show an error to the user
-
+    except (AttributeError, Exception, ValidationError) as e:
         return {
             'type': 'alert-error',
             'text': unicode(e)

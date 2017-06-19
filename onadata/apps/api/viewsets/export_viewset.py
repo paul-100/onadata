@@ -3,8 +3,10 @@ import os
 from rest_framework.authentication import BasicAuthentication
 from rest_framework.settings import api_settings
 from rest_framework.viewsets import ReadOnlyModelViewSet
+from rest_framework.mixins import DestroyModelMixin
 
 from onadata.apps.viewer.models.export import Export
+from onadata.apps.api.permissions import ExportDjangoObjectPermission
 from onadata.libs.renderers import renderers
 from onadata.libs.serializers.export_serializer import ExportSerializer
 from onadata.libs.authentication import (
@@ -15,7 +17,7 @@ from onadata.libs.utils.logger_tools import response_with_mimetype_and_name
 from onadata.libs import filters
 
 
-class ExportViewSet(ReadOnlyModelViewSet):
+class ExportViewSet(DestroyModelMixin, ReadOnlyModelViewSet):
     authentication_classes = (DigestAuthentication,
                               TempTokenAuthentication,
                               TempTokenURLParameterAuthentication,
@@ -33,6 +35,7 @@ class ExportViewSet(ReadOnlyModelViewSet):
     ]
     serializer_class = ExportSerializer
     filter_backends = (filters.ExportFilter,)
+    permission_classes = [ExportDjangoObjectPermission]
 
     def retrieve(self, request, *args, **kwargs):
         export = self.get_object()

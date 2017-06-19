@@ -1,29 +1,29 @@
 import os
-from mock import patch
+from hashlib import md5
 
 from django.conf import settings
-from django.test import TransactionTestCase
-from django_digest.test import DigestAuth
 from django.core.urlresolvers import reverse
+from django.test import TransactionTestCase
+from django_digest.test import Client as DigestClient
+from django_digest.test import DigestAuth
+from mock import patch
 
-from onadata.apps.api.tests.viewsets.test_abstract_viewset import\
+from onadata.apps.api.tests.viewsets.test_abstract_viewset import (
     TestAbstractViewSet
-from onadata.apps.api.viewsets.xform_list_viewset import (
-    XFormListViewSet, PreviewXFormListViewSet
 )
 from onadata.apps.api.viewsets.project_viewset import ProjectViewSet
-from onadata.libs.permissions import DataEntryRole
-from onadata.libs.permissions import ReadOnlyRole
-from onadata.libs.utils.export_tools import ExportBuilder
+from onadata.apps.api.viewsets.xform_list_viewset import (
+    PreviewXFormListViewSet, XFormListViewSet)
+from onadata.apps.main.models import MetaData
+from onadata.libs.permissions import DataEntryRole, ReadOnlyRole
 from onadata.libs.utils.common_tags import GROUP_DELIMETER_TAG
+from onadata.libs.utils.export_tools import ExportBuilder
 
 
 class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
     def setUp(self):
         super(self.__class__, self).setUp()
-        self.view = XFormListViewSet.as_view({
-            "get": "list"
-        })
+        self.view = XFormListViewSet.as_view({"get": "list"})
         self._publish_xls_form_to_project()
 
     def test_get_xform_list(self):
@@ -36,8 +36,35 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertEqual(response.status_code, 200)
 
         path = os.path.join(
-            os.path.dirname(__file__),
-            '..', 'fixtures', 'formList.xml')
+            os.path.dirname(__file__), '..', 'fixtures', 'formList.xml')
+
+        with open(path) as f:
+            form_list_xml = f.read().strip()
+            data = {"hash": self.xform.hash, "pk": self.xform.pk}
+            content = response.render().content
+            self.assertEqual(content, form_list_xml % data)
+            self.assertTrue(response.has_header('X-OpenRosa-Version'))
+            self.assertTrue(
+                response.has_header('X-OpenRosa-Accept-Content-Length'))
+            self.assertTrue(response.has_header('Date'))
+            self.assertEqual(response['Content-Type'],
+                             'text/xml; charset=utf-8')
+
+    def test_get_xform_list_xform_pk_filter(self):
+        self.user.profile.require_auth = True
+        self.user.profile.save()
+        request = self.factory.get('/')
+        response = self.view(request, username=self.user.username,
+                             xform_pk=self.xform.pk)
+        self.assertEqual(response.status_code, 401)
+        auth = DigestAuth('bob', 'bobbob')
+        request.META.update(auth(request.META, response))
+        response = self.view(request, username=self.user.username,
+                             xform_pk=self.xform.pk)
+        self.assertEqual(response.status_code, 200)
+
+        path = os.path.join(
+            os.path.dirname(__file__), '..', 'fixtures', 'formList.xml')
 
         with open(path) as f:
             form_list_xml = f.read().strip()
@@ -53,13 +80,13 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
 
     def test_get_xform_list_of_logged_in_user_with_username_param(self):
         # publish 2 forms as bob
-        xls_path = os.path.join(settings.PROJECT_ROOT, "apps", "main",
-                                "tests", "fixtures", "tutorial.xls")
+        xls_path = os.path.join(settings.PROJECT_ROOT, "apps", "main", "tests",
+                                "fixtures", "tutorial.xls")
         self._publish_xls_form_to_project(xlsform_path=xls_path)
 
-        xls_file_path = os.path.join(
-            settings.PROJECT_ROOT, "apps", "logger", "fixtures",
-            "external_choice_form_v1.xlsx")
+        xls_file_path = os.path.join(settings.PROJECT_ROOT, "apps", "logger",
+                                     "fixtures",
+                                     "external_choice_form_v1.xlsx")
         self._publish_xls_form_to_project(xlsform_path=xls_file_path)
 
         # change one of bob's forms to public
@@ -114,21 +141,25 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
     @patch('onadata.apps.api.viewsets.project_viewset.send_mail')
     def test_read_only_users_get_non_empty_formlist_using_preview_formlist(
             self, mock_send_mail):
-        alice_data = {'username': 'alice', 'email': 'alice@localhost.com',
-                      'password1': 'alice', 'password2': 'alice'}
+        alice_data = {
+            'username': 'alice',
+            'email': 'alice@localhost.com',
+            'password1': 'alice',
+            'password2': 'alice'
+        }
         alice_profile = self._create_user_profile(alice_data)
 
         self.assertFalse(
             ReadOnlyRole.user_has_role(alice_profile.user, self.project))
 
         # share bob's project with alice
-        data = {'username': 'alice',
-                'role': ReadOnlyRole.name,
-                'email_msg': 'I have shared the project with you'}
+        data = {
+            'username': 'alice',
+            'role': ReadOnlyRole.name,
+            'email_msg': 'I have shared the project with you'
+        }
         request = self.factory.post('/', data=data, **self.extra)
-        share_view = ProjectViewSet.as_view({
-            'post': 'share'
-        })
+        share_view = ProjectViewSet.as_view({'post': 'share'})
         projectid = self.project.pk
         response = share_view(request, pk=projectid)
         self.assertEqual(response.status_code, 204)
@@ -149,9 +180,7 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertEqual(response.data, [])
 
         # set endpoint to preview formList
-        self.view = PreviewXFormListViewSet.as_view({
-            "get": "list"
-        })
+        self.view = PreviewXFormListViewSet.as_view({"get": "list"})
 
         request = self.factory.get('/')
         response = self.view(request)
@@ -168,8 +197,12 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
     @patch('onadata.apps.api.viewsets.project_viewset.send_mail')
     def test_get_xform_list_with_shared_forms(self, mock_send_mail):
         # create user alice
-        alice_data = {'username': 'alice', 'email': 'alice@localhost.com',
-                      'password1': 'alice', 'password2': 'alice'}
+        alice_data = {
+            'username': 'alice',
+            'email': 'alice@localhost.com',
+            'password1': 'alice',
+            'password2': 'alice'
+        }
         alice_profile = self._create_user_profile(alice_data)
 
         # check that she can authenticate successfully
@@ -184,13 +217,13 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertFalse(
             ReadOnlyRole.user_has_role(alice_profile.user, self.project))
         # share bob's project with her
-        data = {'username': 'alice',
-                'role': ReadOnlyRole.name,
-                'email_msg': 'I have shared the project with you'}
+        data = {
+            'username': 'alice',
+            'role': ReadOnlyRole.name,
+            'email_msg': 'I have shared the project with you'
+        }
         request = self.factory.post('/', data=data, **self.extra)
-        share_view = ProjectViewSet.as_view({
-            'post': 'share'
-        })
+        share_view = ProjectViewSet.as_view({'post': 'share'})
         projectid = self.project.pk
         response = share_view(request, pk=projectid)
         self.assertEqual(response.status_code, 204)
@@ -207,18 +240,16 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertEqual(response.status_code, 200)
 
         path = os.path.join(
-            os.path.dirname(__file__),
-            '..', 'fixtures', 'formList.xml')
+            os.path.dirname(__file__), '..', 'fixtures', 'formList.xml')
 
         with open(path) as f:
             form_list_xml = f.read().strip()
             data = {"hash": self.xform.hash, "pk": self.xform.pk}
             content = response.render().content
             self.assertEqual(content, form_list_xml % data)
-            download_url = (
-                '<downloadUrl>http://testserver/%s/'
-                'forms/%s/form.xml</downloadUrl>') % (
-                self.user.username, self.xform.id)
+            download_url = ('<downloadUrl>http://testserver/%s/'
+                            'forms/%s/form.xml</downloadUrl>') % (
+                                self.user.username, self.xform.id)
             manifest_url = (
                 '<manifestUrl>http://testserver/%s/xformsManifest'
                 '/%s</manifestUrl>') % (self.user.username, self.xform.id)
@@ -251,8 +282,7 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertTrue(
             response.has_header('X-OpenRosa-Accept-Content-Length'))
         self.assertTrue(response.has_header('Date'))
-        self.assertEqual(response['Content-Type'],
-                         'text/xml; charset=utf-8')
+        self.assertEqual(response['Content-Type'], 'text/xml; charset=utf-8')
 
     def test_get_xform_list_anonymous_user(self):
         request = self.factory.get('/')
@@ -262,8 +292,7 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertEqual(response.status_code, 200)
 
         path = os.path.join(
-            os.path.dirname(__file__),
-            '..', 'fixtures', 'formList.xml')
+            os.path.dirname(__file__), '..', 'fixtures', 'formList.xml')
 
         with open(path) as f:
             form_list_xml = f.read().strip()
@@ -293,8 +322,7 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         alice_profile = self._create_user_profile(alice_data)
 
         self.assertFalse(
-            ReadOnlyRole.user_has_role(alice_profile.user, self.xform)
-        )
+            ReadOnlyRole.user_has_role(alice_profile.user, self.xform))
 
         auth = DigestAuth('alice', 'bobbob')
         request.META.update(auth(request.META, response))
@@ -302,8 +330,8 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertEqual(response.status_code, 200)
         content = response.render().content
         self.assertNotIn(self.xform.id_string, content)
-        self.assertIn(
-            '<?xml version="1.0" encoding="utf-8"?>\n<xforms ', content)
+        self.assertIn('<?xml version="1.0" encoding="utf-8"?>\n<xforms ',
+                      content)
         self.assertTrue(response.has_header('X-OpenRosa-Version'))
         self.assertTrue(
             response.has_header('X-OpenRosa-Accept-Content-Length'))
@@ -318,8 +346,7 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
 
         ReadOnlyRole.add(alice_profile.user, self.xform)
         self.assertTrue(
-            ReadOnlyRole.user_has_role(alice_profile.user, self.xform)
-        )
+            ReadOnlyRole.user_has_role(alice_profile.user, self.xform))
 
         auth = DigestAuth('alice', 'bobbob')
         request.META.update(auth(request.META, response))
@@ -327,8 +354,8 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertEqual(response.status_code, 200)
         content = response.render().content
         self.assertNotIn(self.xform.id_string, content)
-        self.assertIn(
-            '<?xml version="1.0" encoding="utf-8"?>\n<xforms ', content)
+        self.assertIn('<?xml version="1.0" encoding="utf-8"?>\n<xforms ',
+                      content)
         self.assertTrue(response.has_header('X-OpenRosa-Version'))
         self.assertTrue(
             response.has_header('X-OpenRosa-Accept-Content-Length'))
@@ -344,8 +371,7 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         DataEntryRole.add(alice_profile.user, self.xform)
 
         self.assertTrue(
-            DataEntryRole.user_has_role(alice_profile.user, self.xform)
-        )
+            DataEntryRole.user_has_role(alice_profile.user, self.xform))
 
         auth = DigestAuth('alice', 'bobbob')
         request.META.update(auth(request.META, response))
@@ -353,8 +379,7 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertEqual(response.status_code, 200)
 
         path = os.path.join(
-            os.path.dirname(__file__),
-            '..', 'fixtures', 'formList.xml')
+            os.path.dirname(__file__), '..', 'fixtures', 'formList.xml')
 
         with open(path) as f:
             form_list_xml = f.read().strip()
@@ -369,9 +394,12 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
                              'text/xml; charset=utf-8')
 
     def test_retrieve_xform_xml(self):
-        self.view = XFormListViewSet.as_view({
-            "get": "retrieve"
-        })
+        self.view = XFormListViewSet.as_view(
+            {
+                "get": "retrieve",
+                "head": "retrieve"
+            }
+        )
         request = self.factory.head('/')
         response = self.view(request, pk=self.xform.pk)
         auth = DigestAuth('bob', 'bobbob')
@@ -381,15 +409,14 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.assertEqual(response.status_code, 200)
 
         path = os.path.join(
-            os.path.dirname(__file__),
-            '..', 'fixtures', 'Transportation Form.xml')
+            os.path.dirname(__file__), '..', 'fixtures',
+            'Transportation Form.xml')
 
         with open(path) as f:
             form_xml = f.read().strip()
             data = {"form_uuid": self.xform.uuid}
             content = response.render().content.strip()
-            content = content.replace(
-                self.xform.version, u"20141112071722")
+            content = content.replace(self.xform.version, u"20141112071722")
             self.assertEqual(content, form_xml % data)
             self.assertTrue(response.has_header('X-OpenRosa-Version'))
             self.assertTrue(
@@ -401,10 +428,8 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
     def _load_metadata(self, xform=None):
         data_value = "screenshot.png"
         data_type = 'media'
-        fixture_dir = os.path.join(
-            settings.PROJECT_ROOT, "apps", "main", "tests", "fixtures",
-            "transportation"
-        )
+        fixture_dir = os.path.join(settings.PROJECT_ROOT, "apps", "main",
+                                   "tests", "fixtures", "transportation")
         path = os.path.join(fixture_dir, data_value)
         xform = xform or self.xform
 
@@ -412,10 +437,14 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
 
     def test_retrieve_xform_manifest(self):
         self._load_metadata(self.xform)
-        self.view = XFormListViewSet.as_view({
-            "get": "manifest"
-        })
+        self.view = XFormListViewSet.as_view(
+            {
+                "get": "manifest",
+                "head": "manifest"
+            }
+        )
         request = self.factory.head('/')
+
         response = self.view(request, pk=self.xform.pk)
         auth = DigestAuth('bob', 'bobbob')
         request = self.factory.get('/')
@@ -425,8 +454,11 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
 
         manifest_xml = """<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns="http://openrosa.org/xforms/xformsManifest"><mediaFile><filename>screenshot.png</filename><hash>%(hash)s</hash><downloadUrl>http://testserver/bob/xformsMedia/%(xform)s/%(pk)s.png</downloadUrl></mediaFile></manifest>"""  # noqa
-        data = {"hash": self.metadata.hash, "pk": self.metadata.pk,
-                "xform": self.xform.pk}
+        data = {
+            "hash": self.metadata.hash,
+            "pk": self.metadata.pk,
+            "xform": self.xform.pk
+        }
         content = response.render().content.strip()
         self.assertEqual(content, manifest_xml % data)
         self.assertTrue(response.has_header('X-OpenRosa-Version'))
@@ -437,20 +469,21 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
 
     def test_retrieve_xform_manifest_anonymous_user(self):
         self._load_metadata(self.xform)
-        self.view = XFormListViewSet.as_view({
-            "get": "manifest"
-        })
+        self.view = XFormListViewSet.as_view({"get": "manifest"})
         request = self.factory.get('/')
         response = self.view(request, pk=self.xform.pk)
         self.assertEqual(response.status_code, 401)
-        response = self.view(request, pk=self.xform.pk,
-                             username=self.user.username)
+        response = self.view(
+            request, pk=self.xform.pk, username=self.user.username)
         self.assertEqual(response.status_code, 200)
 
         manifest_xml = """<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns="http://openrosa.org/xforms/xformsManifest"><mediaFile><filename>screenshot.png</filename><hash>%(hash)s</hash><downloadUrl>http://testserver/bob/xformsMedia/%(xform)s/%(pk)s.png</downloadUrl></mediaFile></manifest>"""  # noqa
-        data = {"hash": self.metadata.hash, "pk": self.metadata.pk,
-                "xform": self.xform.pk}
+        data = {
+            "hash": self.metadata.hash,
+            "pk": self.metadata.pk,
+            "xform": self.xform.pk
+        }
         content = response.render().content.strip()
         self.assertEqual(content, manifest_xml % data)
         self.assertTrue(response.has_header('X-OpenRosa-Version'))
@@ -463,66 +496,71 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         self.user.profile.require_auth = True
         self.user.profile.save()
         self._load_metadata(self.xform)
-        self.view = XFormListViewSet.as_view({
-            "get": "manifest"
-        })
+        self.view = XFormListViewSet.as_view({"get": "manifest"})
         request = self.factory.get('/')
         response = self.view(request, pk=self.xform.pk)
         self.assertEqual(response.status_code, 401)
-        response = self.view(request, pk=self.xform.pk,
-                             username=self.user.username)
+        response = self.view(
+            request, pk=self.xform.pk, username=self.user.username)
         self.assertEqual(response.status_code, 401)
 
     def test_retrieve_xform_media(self):
         self._load_metadata(self.xform)
-        self.view = XFormListViewSet.as_view({
-            "get": "media"
-        })
+        self.view = XFormListViewSet.as_view(
+            {
+                "get": "media",
+                "head": "media"
+            }
+        )
         request = self.factory.head('/')
-        response = self.view(request, pk=self.xform.pk,
-                             metadata=self.metadata.pk, format='png')
+        response = self.view(
+            request, pk=self.xform.pk, metadata=self.metadata.pk, format='png')
         auth = DigestAuth('bob', 'bobbob')
         request = self.factory.get('/')
         request.META.update(auth(request.META, response))
-        response = self.view(request, pk=self.xform.pk,
-                             metadata=self.metadata.pk, format='png')
+        response = self.view(
+            request, pk=self.xform.pk, metadata=self.metadata.pk, format='png')
         self.assertEqual(response.status_code, 200)
 
     def test_retrieve_xform_media_anonymous_user(self):
         self._load_metadata(self.xform)
-        self.view = XFormListViewSet.as_view({
-            "get": "media"
-        })
+        self.view = XFormListViewSet.as_view({"get": "media"})
         request = self.factory.get('/')
-        response = self.view(request, pk=self.xform.pk,
-                             metadata=self.metadata.pk, format='png')
+        response = self.view(
+            request, pk=self.xform.pk, metadata=self.metadata.pk, format='png')
         self.assertEqual(response.status_code, 401)
 
-        response = self.view(request, pk=self.xform.pk,
-                             username=self.user.username,
-                             metadata=self.metadata.pk, format='png')
+        response = self.view(
+            request,
+            pk=self.xform.pk,
+            username=self.user.username,
+            metadata=self.metadata.pk,
+            format='png')
         self.assertEqual(response.status_code, 200)
 
     def test_retrieve_xform_media_anonymous_user_require_auth(self):
         self.user.profile.require_auth = True
         self.user.profile.save()
         self._load_metadata(self.xform)
-        self.view = XFormListViewSet.as_view({
-            "get": "media"
-        })
+        self.view = XFormListViewSet.as_view({"get": "media"})
         request = self.factory.get('/')
-        response = self.view(request, pk=self.xform.pk,
-                             metadata=self.metadata.pk, format='png')
+        response = self.view(
+            request, pk=self.xform.pk, metadata=self.metadata.pk, format='png')
         self.assertEqual(response.status_code, 401)
 
     def test_retrieve_xform_media_linked_xform(self):
         data_type = 'media'
         data_value = 'xform {} transportation'.format(self.xform.pk)
         self._add_form_metadata(self.xform, data_type, data_value)
+        self._make_submissions()
+        self.xform.reload()
 
-        self.view = XFormListViewSet.as_view({
-            "get": "manifest"
-        })
+        self.view = XFormListViewSet.as_view(
+            {
+                "get": "manifest",
+                "head": "manifest"
+            }
+        )
         request = self.factory.head('/')
         response = self.view(request, pk=self.xform.pk)
         auth = DigestAuth('bob', 'bobbob')
@@ -531,23 +569,29 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         response = self.view(request, pk=self.xform.pk)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data[0]['filename'], 'transportation.csv')
+        self.assertEqual(
+            response.data[0]['hash'], 'md5:%s' %
+            md5(self.xform.last_submission_time.isoformat()).hexdigest())
 
-        self.view = XFormListViewSet.as_view({
-            "get": "media"
-        })
+        self.view = XFormListViewSet.as_view(
+            {
+                "get": "media",
+                "head": "media"
+            }
+        )
         request = self.factory.get('/')
-        response = self.view(request, pk=self.xform.pk,
-                             metadata=self.metadata.pk, format='csv')
+        response = self.view(
+            request, pk=self.xform.pk, metadata=self.metadata.pk, format='csv')
         self.assertEqual(response.status_code, 401)
 
         request = self.factory.head('/')
-        response = self.view(request, pk=self.xform.pk,
-                             metadata=self.metadata.pk, format='csv')
+        response = self.view(
+            request, pk=self.xform.pk, metadata=self.metadata.pk, format='csv')
         auth = DigestAuth('bob', 'bobbob')
         request = self.factory.get('/')
         request.META.update(auth(request.META, response))
-        response = self.view(request, pk=self.xform.pk,
-                             metadata=self.metadata.pk, format='csv')
+        response = self.view(
+            request, pk=self.xform.pk, metadata=self.metadata.pk, format='csv')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response['Content-Disposition'],
                          'attachment; filename=transportation.csv')
@@ -559,9 +603,12 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         data_value = 'xform {} transportation'.format(self.xform.pk)
         media = self._add_form_metadata(self.xform, data_type, data_value)
 
-        self.view = XFormListViewSet.as_view({
-            "get": "manifest"
-        })
+        self.view = XFormListViewSet.as_view(
+            {
+                "get": "manifest",
+                "head": "manifest"
+            }
+        )
 
         # sign in bob
         request = self.factory.head('/')
@@ -579,15 +626,67 @@ class TestXFormListViewSet(TestAbstractViewSet, TransactionTestCase):
         manifest_media_url = "%s?%s=%s" % (media.data['media_url'],
                                            GROUP_DELIMETER_TAG,
                                            ExportBuilder.GROUP_DELIMITER_DOT)
-        self.assertEqual(manifest_media_url, response.data[0]['downloadUrl'])
+        download_url = response.data[0]['downloadUrl']
+        self.assertEqual(manifest_media_url, download_url)
+
+        url = '/bob/xformsMedia/{}/{}.csv?group_delimiter=.'\
+            .format(self.xform.pk, self.metadata.pk)
+        username = 'bob'
+        password = 'bob'
+
+        client = DigestClient()
+        client.set_authorization(username, password, 'Digest')
+
+        req = client.get(url)
+        self.assertEqual(req.status_code, 200)
+
+        # enable meta perms
+        data_value = "editor-minor|dataentry"
+        MetaData.xform_meta_permission(self.xform, data_value=data_value)
+
+        req = client.get(url)
+        self.assertEqual(req.status_code, 401)
 
     def test_xform_3gp_media_type(self):
 
         for fmt in ["png", "jpg", "mp3", "3gp", "wav"]:
-            url = reverse('xform-media', kwargs={
-                'username': 'bob',
-                'pk': 1,
-                'metadata': '1234',
-                'format': fmt})
+            url = reverse(
+                'xform-media',
+                kwargs={
+                    'username': 'bob',
+                    'pk': 1,
+                    'metadata': '1234',
+                    'format': fmt
+                })
 
             self.assertEqual(url, '/bob/xformsMedia/1/1234.{}'.format(fmt))
+
+    def test_get_xform_anonymous_user_xform_require_auth(self):
+        self.view = XFormListViewSet.as_view(
+            {
+                "get": "retrieve",
+                "head": "retrieve"
+            }
+        )
+        request = self.factory.head('/')
+        response = self.view(request, username='bob', pk=self.xform.pk)
+        # no authentication prompted
+        self.assertEqual(response.status_code, 200)
+
+        self.assertFalse(self.xform.require_auth)
+        self.assertFalse(self.user.profile.require_auth)
+
+        self.xform.require_auth = True
+        self.xform.save()
+
+        request = self.factory.head('/')
+        response = self.view(request, username='bob', pk=self.xform.pk)
+        # authentication prompted
+        self.assertEqual(response.status_code, 401)
+
+        auth = DigestAuth('bob', 'bobbob')
+        request = self.factory.get('/')
+        request.META.update(auth(request.META, response))
+        response = self.view(request, username='bob', pk=self.xform.pk)
+        # success with authentication
+        self.assertEqual(response.status_code, 200)

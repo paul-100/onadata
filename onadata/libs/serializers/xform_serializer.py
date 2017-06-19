@@ -1,4 +1,5 @@
 import logging
+from hashlib import md5
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -8,24 +9,21 @@ from requests.exceptions import ConnectionError
 from rest_framework import serializers
 from rest_framework.reverse import reverse
 
-from onadata.apps.logger.models import Instance, XForm
+from onadata.apps.logger.models import DataView, Instance, XForm
 from onadata.apps.main.models.meta_data import MetaData
 from onadata.libs.permissions import get_role, is_organization
 from onadata.libs.serializers.dataview_serializer import \
     DataViewMinimalSerializer
 from onadata.libs.serializers.metadata_serializer import MetaDataSerializer
 from onadata.libs.serializers.tag_list_serializer import TagListSerializer
-from onadata.libs.utils.cache_tools import (ENKETO_PREVIEW_URL_CACHE,
-                                            ENKETO_URL_CACHE,
-                                            XFORM_DATA_VERSIONS,
-                                            XFORM_LINKED_DATAVIEWS,
-                                            XFORM_METADATA_CACHE,
-                                            XFORM_PERMISSIONS_CACHE)
+from onadata.libs.utils.cache_tools import (
+    ENKETO_PREVIEW_URL_CACHE, ENKETO_URL_CACHE, XFORM_DATA_VERSIONS,
+    XFORM_LINKED_DATAVIEWS, XFORM_METADATA_CACHE, XFORM_PERMISSIONS_CACHE,
+    XFORM_COUNT)
 from onadata.libs.utils.common_tags import GROUP_DELIMETER_TAG
 from onadata.libs.utils.decorators import check_obj
-from onadata.libs.utils.viewer_tools import (EnketoError, enketo_url,
-                                             get_enketo_preview_url,
-                                             get_form_url)
+from onadata.libs.utils.viewer_tools import (
+    EnketoError, enketo_url, get_enketo_preview_url, get_form_url)
 
 
 def _create_enketo_url(request, xform):
@@ -37,7 +35,7 @@ def _create_enketo_url(request, xform):
     :return: enketo url
     """
     form_url = get_form_url(request, xform.user.username,
-                            settings.ENKETO_PROTOCOL)
+                            settings.ENKETO_PROTOCOL, xform_pk=xform.pk)
     url = ""
 
     try:
@@ -143,7 +141,7 @@ class XFormMixin(object):
                 try:
                     url = get_enketo_preview_url(
                         self.context.get('request'), obj.user.username,
-                        obj.id_string)
+                        obj.id_string, xform_pk=obj.pk)
                 except:
                     return url
                 else:
@@ -167,6 +165,16 @@ class XFormMixin(object):
 
             return data_views
         return []
+
+    def get_num_of_submissions(self, obj):
+        if obj:
+            key = '{}{}'.format(XFORM_COUNT, obj.pk)
+            count = cache.get(key)
+            if count:
+                return count
+            count = obj.submission_count()
+            cache.set(key, count)
+            return count
 
 
 class XFormBaseSerializer(XFormMixin, serializers.HyperlinkedModelSerializer):
@@ -192,7 +200,7 @@ class XFormBaseSerializer(XFormMixin, serializers.HyperlinkedModelSerializer):
     users = serializers.SerializerMethodField()
     enketo_url = serializers.SerializerMethodField()
     enketo_preview_url = serializers.SerializerMethodField()
-    num_of_submissions = serializers.ReadOnlyField()
+    num_of_submissions = serializers.SerializerMethodField()
     data_views = serializers.SerializerMethodField()
 
     class Meta:
@@ -229,7 +237,7 @@ class XFormSerializer(XFormMixin, serializers.HyperlinkedModelSerializer):
     users = serializers.SerializerMethodField()
     enketo_url = serializers.SerializerMethodField()
     enketo_preview_url = serializers.SerializerMethodField()
-    num_of_submissions = serializers.ReadOnlyField()
+    num_of_submissions = serializers.SerializerMethodField()
     form_versions = serializers.SerializerMethodField()
     data_views = serializers.SerializerMethodField()
 
@@ -342,12 +350,36 @@ class XFormManifestSerializer(serializers.Serializer):
 
     @check_obj
     def get_hash(self, obj):
-        return u"%s" % (obj.file_hash or 'md5:')
+        filename = obj.data_value
+        hsh = obj.file_hash
+        parts = filename.split(' ')
+        # filtered dataset is of the form "xform PK name", xform pk is the
+        # second item
+        if len(parts) > 2:
+            dataset_type = parts[0]
+            pk = parts[1]
+            xform = None
+            if dataset_type == 'xform':
+                xform = XForm.objects.filter(pk=pk)\
+                    .only('last_submission_time').first()
+            else:
+                data_view = DataView.objects.filter(pk=pk)\
+                    .only('xform__last_submission_time').first()
+                if data_view:
+                    xform = data_view.xform
+
+            if xform and xform.last_submission_time:
+                hsh = u'md5:%s' % (
+                    md5(xform.last_submission_time.isoformat()).hexdigest())
+
+        return u"%s" % (hsh or 'md5:')
 
     @check_obj
     def get_filename(self, obj):
         filename = obj.data_value
         parts = filename.split(' ')
+        # filtered dataset is of the form "xform PK name", filename is the
+        # third item
         if len(parts) > 2:
             filename = u'%s.csv' % parts[2]
 

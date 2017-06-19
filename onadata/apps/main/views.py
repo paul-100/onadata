@@ -18,7 +18,7 @@ from django.template import RequestContext, loader
 from django.utils.translation import ugettext as _
 from django.views.decorators.http import (require_GET, require_http_methods,
                                           require_POST)
-from guardian.shortcuts import assign_perm, get_users_with_perms, remove_perm
+from guardian.shortcuts import assign_perm, remove_perm
 from rest_framework.authtoken.models import Token
 
 from onadata.apps.logger.models import Instance, XForm
@@ -51,7 +51,9 @@ from onadata.libs.utils.qrcode import generate_qrcode
 from onadata.libs.utils.user_auth import (add_cors_headers, check_and_set_user,
                                           check_and_set_user_and_form,
                                           get_user_default_project,
-                                          get_xform_and_perms, has_permission,
+                                          get_xform_and_perms,
+                                          get_xform_users_with_perms,
+                                          has_permission,
                                           helper_auth_helper, set_profile_data)
 from onadata.libs.utils.viewer_tools import (EnketoError, enketo_url,
                                              get_enketo_preview_url, get_form)
@@ -212,10 +214,18 @@ def profile(request, username):
             "/%s" % request.user.username)
         url = request_url.replace('http://', 'https://')
         xforms = XForm.objects.filter(user=content_user)\
-            .select_related('user')
+            .select_related('user').only(
+                'id', 'id_string', 'downloadable', 'shared', 'shared_data',
+                'user__username', 'num_of_submissions', 'title',
+                'last_submission_time', 'instances_with_geopoints',
+                'encrypted', 'date_created')
         user_xforms = xforms
         # forms shared with user
-        forms_shared_with = get_forms_shared_with_user(content_user)
+        forms_shared_with = get_forms_shared_with_user(content_user).only(
+            'id', 'id_string', 'downloadable', 'shared', 'shared_data',
+            'user__username', 'num_of_submissions', 'title',
+            'last_submission_time', 'instances_with_geopoints', 'encrypted',
+            'date_created')
         xforms_list = [
             {
                 'id': 'published',
@@ -356,7 +366,7 @@ def set_xform_owner_data(data, xform, request, username, id_string):
     data['external_export_form'] = ExternalExportForm()
     users_with_perms = []
 
-    for perm in get_users_with_perms(xform, attach_perms=True).items():
+    for perm in get_xform_users_with_perms(xform).items():
         has_perm = []
         if 'change_xform' in perm[1]:
             has_perm.append(_(u"Can Edit"))
@@ -394,8 +404,8 @@ def show(request, username=None, id_string=None, uuid=None):
         data['content_user'] = xform.user
         data['base_url'] = "https://%s" % request.get_host()
         data['source'] = MetaData.source(xform)
-        data['form_license'] = MetaData.form_license(xform).data_value
-        data['data_license'] = MetaData.data_license(xform).data_value
+        data['form_license'] = MetaData.form_license(xform)
+        data['data_license'] = MetaData.data_license(xform)
         data['supporting_docs'] = MetaData.supporting_docs(xform)
         data['media_upload'] = MetaData.media_upload(xform)
         data['mapbox_layer'] = MetaData.mapbox_layer_upload(xform)
@@ -1338,11 +1348,17 @@ def activity_api(request, username):
 
 
 def qrcode(request, username, id_string):
+    xform_kwargs = {
+        'id_string__iexact': id_string,
+        'user__username__iexact': username
+    }
+
+    xform = get_form(xform_kwargs)
     try:
         formhub_url = "http://%s/" % request.META['HTTP_HOST']
     except:
         formhub_url = "http://formhub.org/"
-    formhub_url = formhub_url + username
+    formhub_url = formhub_url + username + '/%s' % xform.pk
 
     if settings.TESTING_MODE:
         formhub_url = "https://{}/{}".format(settings.TEST_HTTP_HOST,
@@ -1381,7 +1397,8 @@ def enketo_preview(request, username, id_string):
     try:
         enketo_preview_url = get_enketo_preview_url(request,
                                                     owner.username,
-                                                    xform.id_string)
+                                                    xform.id_string,
+                                                    xform_pk=xform.pk)
     except EnketoError as e:
         return HttpResponse(e)
 

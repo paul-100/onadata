@@ -4,7 +4,7 @@ from xml.dom import minidom, Node
 from django.utils.encoding import smart_unicode, smart_str
 from django.utils.translation import ugettext as _
 
-from onadata.libs.utils.common_tags import XFORM_ID_STRING
+from onadata.libs.utils.common_tags import XFORM_ID_STRING, VERSION
 
 
 class XLSFormError(Exception):
@@ -170,9 +170,16 @@ def _xml_node_to_dict(node, repeats=[], encrypted=False):
                 if child_name not in value:
                     value[child_name] = d[child_name]
                 else:
-                    raise InstanceMultipleNodeError(
-                        _(u"Multiple nodes with the same name '%s'"
-                          u" while not a repeat" % child_name))
+                    # node is repeated, aggregate node values
+                    node_value = value[child_name]
+                    # 1. check if the node values is a list
+                    if type(node_value) is not list:
+                        # if not a list create
+                        value[child_name] = [node_value]
+                    # 2. parse the node
+                    d = _xml_node_to_dict(child, repeats)
+                    # 3. aggregate
+                    value[child_name].append(d[child_name])
             else:
                 if child_name not in value:
                     value[child_name] = [d[child_name]]
@@ -333,9 +340,17 @@ class XFormInstanceParser(object):
     def get_xform_id_string(self):
         return self._attributes[u"id"]
 
+    def get_version(self):
+        return self._attributes.get(u"version")
+
     def get_flat_dict_with_attributes(self):
         result = self.to_flat_dict().copy()
         result[XFORM_ID_STRING] = self.get_xform_id_string()
+
+        version = self.get_version()
+        if version:
+            result[VERSION] = self.get_version()
+
         return result
 
 

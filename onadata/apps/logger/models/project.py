@@ -3,6 +3,7 @@ from django.db.models import Prefetch
 from django.db.models.signals import post_save
 from django.contrib.auth.models import User
 from django.contrib.postgres.fields import JSONField
+from django.utils import timezone
 from django.core.exceptions import ValidationError
 from guardian.models import UserObjectPermissionBase
 from guardian.models import GroupObjectPermissionBase
@@ -73,6 +74,7 @@ class Project(BaseModel):
     shared = models.BooleanField(default=False)
     date_created = models.DateTimeField(auto_now_add=True)
     date_modified = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(blank=True, null=True)
 
     objects = models.Manager()
     tags = TaggableManager(related_name='project_tags')
@@ -93,6 +95,23 @@ class Project(BaseModel):
     def user(self):
         return self.created_by
 
+    def soft_delete(self):
+        """
+        Soft deletes a project by adding a deleted_at timestamp and renaming
+        the project name by adding a deleted-at and timestamp.
+        Also soft deletes the associated forms.
+        :return:
+        """
+
+        soft_deletion_time = timezone.now()
+        deletion_suffix = soft_deletion_time.strftime('-deleted-at-%s')
+        self.deleted_at = soft_deletion_time
+        self.name += deletion_suffix
+        self.save()
+
+        for form in self.xform_set.all():
+            form.soft_delete()
+
 
 def set_object_permissions(sender, instance=None, created=False, **kwargs):
     if created:
@@ -105,6 +124,9 @@ def set_object_permissions(sender, instance=None, created=False, **kwargs):
             for owner in owners:
                 assign_perm(perm.codename, owner, instance)
 
+            if owners:
+                for user in owners[0].user_set.all():
+                    assign_perm(perm.codename, user, instance)
             if instance.created_by:
                 assign_perm(perm.codename, instance.created_by, instance)
 

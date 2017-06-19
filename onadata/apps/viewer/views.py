@@ -49,7 +49,8 @@ from onadata.libs.utils.user_auth import has_permission, get_xform_and_perms,\
     helper_auth_helper
 from xls_writer import XlsWriter
 from onadata.libs.utils.chart_tools import build_chart_data
-from oauth2client.contrib.django_orm import Storage
+from oauth2client.contrib.django_util.storage import (
+    DjangoORMStorage as Storage)
 from oauth2client import client as google_client
 
 
@@ -217,7 +218,8 @@ def add_submission_with(request, username, id_string):
                'instance_id': uuid.uuid4().hex}
 
     r = requests.post(url, data=payload,
-                      auth=(settings.ENKETO_API_TOKEN, ''), verify=False)
+                      auth=(settings.ENKETO_API_TOKEN, ''),
+                      verify=getattr(settings, 'VERIFY_SSL', True))
 
     return HttpResponse(r.text, content_type='application/json')
 
@@ -250,8 +252,9 @@ def data_export(request, username, id_string, export_type):
 
     options = {"extension": extension,
                "username": username,
-               "id_string": id_string,
-               "query": query}
+               "id_string": id_string}
+    if query:
+        options['query'] = query
 
     # check if we need to re-generate,
     # we always re-generate if a filter is specified
@@ -346,6 +349,8 @@ def create_export(request, username, id_string, export_type):
     binary_select_multiples = getattr(settings, 'BINARY_SELECT_MULTIPLES',
                                       False)
     remove_group_name = request.POST.get("options[remove_group_name]", "false")
+    value_select_multiples = request.POST.get(
+        "options[value_select_multiples]", "false")
 
     # external export option
     meta = request.POST.get("meta")
@@ -353,6 +358,7 @@ def create_export(request, username, id_string, export_type):
         'group_delimiter': group_delimiter,
         'split_select_multiples': split_select_multiples,
         'binary_select_multiples': binary_select_multiples,
+        'value_select_multiples': str_to_bool(value_select_multiples),
         'remove_group_name': str_to_bool(remove_group_name),
         'meta': meta.replace(",", "") if meta else None,
         'google_credentials': credential

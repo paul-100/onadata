@@ -5,7 +5,6 @@ import os
 import re
 import requests
 import jwt
-import hashlib
 import mock
 
 from collections import OrderedDict
@@ -18,6 +17,7 @@ from django.core.cache import cache
 from django.core.files.storage import default_storage
 from django.test.utils import override_settings
 from django.utils.dateparse import parse_datetime
+from django.utils.timezone import utc
 from django_digest.test import DigestAuth
 from httmock import urlmatch, HTTMock
 from mock import patch, Mock
@@ -352,6 +352,22 @@ class TestXFormViewSet(TestAbstractViewSet):
             self._publish_xls_form_to_project()
             request = self.factory.get('/', **self.extra)
             response = self.view(request)
+            self.assertNotEqual(response.get('Cache-Control'), None)
+
+    @override_settings(STREAM_DATA=True)
+    def test_form_list_stream(self):
+        view = XFormViewSet.as_view({
+            'get': 'list',
+        })
+        with HTTMock(enketo_mock):
+            self._publish_xls_form_to_project()
+            request = self.factory.get('/', **self.extra)
+            response = view(request)
+            self.assertTrue(response.streaming)
+            streaming_data = json.loads(
+                u''.join([i for i in response.streaming_content])
+            )
+            self.assertIsInstance(streaming_data, list)
             self.assertNotEqual(response.get('Cache-Control'), None)
             self.assertEqual(response.status_code, 200)
 
@@ -1389,7 +1405,7 @@ class TestXFormViewSet(TestAbstractViewSet):
             view = XFormViewSet.as_view({
                 'patch': 'partial_update'
             })
-            title = u'مرحب'
+            title = u'Hello & World!'
             description = 'DESCRIPTION'
             data = {'public': True, 'description': description, 'title': title,
                     'downloadable': True}
@@ -1398,6 +1414,13 @@ class TestXFormViewSet(TestAbstractViewSet):
 
             request = self.factory.patch('/', data=data, **self.extra)
             response = view(request, pk=self.xform.id)
+            self.assertEqual(response.status_code, 400)
+
+            title = u'Hello and World!'
+            data['title'] = title
+            request = self.factory.patch('/', data=data, **self.extra)
+            response = view(request, pk=self.xform.id)
+            self.assertEqual(response.status_code, 200)
 
             self.xform.reload()
             self.assertTrue(self.xform.downloadable)
@@ -1527,7 +1550,8 @@ class TestXFormViewSet(TestAbstractViewSet):
                 None)
 
             view = XFormViewSet.as_view({
-                'delete': 'destroy'
+                'delete': 'destroy',
+                'get': 'retrieve'
             })
             formid = self.xform.pk
             request = self.factory.delete('/', **self.extra)
@@ -1541,8 +1565,15 @@ class TestXFormViewSet(TestAbstractViewSet):
                                         self.project.pk)),
                 None)
 
-            with self.assertRaises(XForm.DoesNotExist):
-                self.xform.reload()
+            self.xform.reload()
+
+            self.assertIsNotNone(self.xform.deleted_at)
+            self.assertTrue('deleted-at' in self.xform.id_string)
+
+            request = self.factory.get('/', **self.extra)
+            response = view(request, pk=formid)
+
+            self.assertEqual(response.status_code, 404)
 
             request = self.factory.get('/', **self.extra)
             response = self.view(request)
@@ -2729,7 +2760,7 @@ class TestXFormViewSet(TestAbstractViewSet):
             self.assertEqual(response.status_code, 202)
             self.assertTrue('job_uuid' in response.data)
             self.assertTrue('time_async_triggered' in response.data)
-            self.assertEquals(count - 1, XForm.objects.count())
+            self.assertEquals(count, XForm.objects.count())
 
             view = XFormViewSet.as_view({
                 'get': 'delete_async'
@@ -2742,6 +2773,20 @@ class TestXFormViewSet(TestAbstractViewSet):
             self.assertTrue(mock_get_status.called)
             self.assertEqual(response.status_code, 202)
             self.assertEquals(response.data, {'job_status': 'PENDING'})
+
+            xform = XForm.objects.get(pk=formid)
+
+            self.assertIsNotNone(xform.deleted_at)
+            self.assertTrue('deleted-at' in xform.id_string)
+
+            view = XFormViewSet.as_view({
+                'get': 'retrieve'
+            })
+
+            request = self.factory.get('/', **self.extra)
+            response = view(request, pk=formid)
+
+            self.assertEqual(response.status_code, 404)
 
     @override_settings(CELERY_ALWAYS_EAGER=True)
     @patch('onadata.libs.utils.api_export_tools.AsyncResult')
@@ -3022,7 +3067,6 @@ class TestXFormViewSet(TestAbstractViewSet):
     def test_different_form_versions(self):
         with HTTMock(enketo_mock):
             self._publish_xls_form_to_project()
-            self._make_submissions()
 
             view = XFormViewSet.as_view({
                 'patch': 'partial_update',
@@ -3038,6 +3082,7 @@ class TestXFormViewSet(TestAbstractViewSet):
                 response = view(request, pk=self.xform.pk)
                 self.assertEqual(response.status_code, 200)
 
+            self._make_submissions()
             # make more submission after form update
             surveys = ['transport_2011-07-25_19-05-36-edited']
             paths = [os.path.join(
@@ -3055,8 +3100,9 @@ class TestXFormViewSet(TestAbstractViewSet):
 
             self.assertIn('form_versions', response.data)
 
-            expected = [{'total': 1, 'version': u'212121211'},
-                        {'total': 4, 'version': u'2014111'}]
+            expected = [{'total': 3, 'version': u'212121211'},
+                        {'total': 2, 'version': u'2014111'}]
+
             for v in expected:
                 self.assertIn(v, response.data.get('form_versions'))
 
@@ -3570,7 +3616,7 @@ class TestXFormViewSet(TestAbstractViewSet):
 
     def test_csv_export_filtered_by_date(self):
         with HTTMock(enketo_mock):
-            start_date = datetime(2015, 12, 2)
+            start_date = datetime(2015, 12, 2, tzinfo=utc)
             self._make_submission_over_date_range(start_date)
 
             first_datetime = start_date.strftime(MONGO_STRFTIME)
@@ -3591,15 +3637,55 @@ class TestXFormViewSet(TestAbstractViewSet):
             self._validate_csv_export(response, test_file_path)
 
             export = Export.objects.last()
-
             self.assertIn("query", export.options)
-
-            query_str = hashlib.md5(query_str).hexdigest()
             self.assertEquals(export.options['query'], query_str)
+
+    @patch('onadata.libs.utils.api_export_tools.AsyncResult')
+    def test_export_form_data_async_with_filtered_date(self, async_result):
+        with HTTMock(enketo_mock):
+            start_date = datetime(2015, 12, 2, tzinfo=utc)
+            self._make_submission_over_date_range(start_date)
+
+            first_datetime = start_date.strftime(MONGO_STRFTIME)
+            second_datetime = start_date + timedelta(days=1, hours=20)
+            query_str = '{"_submission_time": {"$gte": "'\
+                        + first_datetime + '", "$lte": "'\
+                        + second_datetime.strftime(MONGO_STRFTIME) + '"}}'
+            count = Export.objects.all().count()
+
+            export_view = XFormViewSet.as_view({
+                'get': 'export_async',
+            })
+            formid = self.xform.pk
+
+            for export_format in ['csv']:
+                request = self.factory.get(
+                    '/', data={
+                        "format": export_format, 'query': query_str
+                    }, **self.extra)
+                response = export_view(request, pk=formid)
+                self.assertIsNotNone(response.data)
+                self.assertEqual(response.status_code, 202)
+                self.assertTrue('job_uuid' in response.data)
+                self.assertEquals(count + 1, Export.objects.all().count())
+
+                task_id = response.data.get('job_uuid')
+                get_data = {'job_uuid': task_id}
+                request = self.factory.get('/', data=get_data, **self.extra)
+                response = export_view(request, pk=formid)
+
+                self.assertTrue(async_result.called)
+                self.assertEqual(response.status_code, 202)
+                export = Export.objects.get(task_id=task_id)
+                self.assertTrue(export.is_successful)
+
+                export = Export.objects.last()
+                self.assertIn("query", export.options)
+                self.assertEquals(export.options['query'], query_str)
 
     def test_previous_export_with_date_filter_is_returned(self):
         with HTTMock(enketo_mock):
-            start_date = datetime(2015, 12, 2)
+            start_date = datetime(2015, 12, 2, tzinfo=utc)
             self._make_submission_over_date_range(start_date)
 
             first_datetime = start_date.strftime(MONGO_STRFTIME)
@@ -3672,7 +3758,7 @@ class TestXFormViewSet(TestAbstractViewSet):
 
     def test_normal_export_after_export_with_date_filter(self):
         with HTTMock(enketo_mock):
-            start_date = datetime(2015, 12, 2)
+            start_date = datetime(2015, 12, 2, tzinfo=utc)
             self._make_submission_over_date_range(start_date)
 
             first_datetime = start_date.strftime(MONGO_STRFTIME)
@@ -3696,7 +3782,7 @@ class TestXFormViewSet(TestAbstractViewSet):
             response = view(request, pk=self.xform.pk, format='csv')
             self.assertEqual(response.status_code, 200)
 
-            # no change in count of exports
+            # should create a new export
             self.assertEquals(count + 1, Export.objects.all().count())
 
             test_file_path = os.path.join(settings.PROJECT_ROOT, 'apps',
@@ -3825,7 +3911,7 @@ class TestXFormViewSet(TestAbstractViewSet):
                     "fixtures", "tutorial", "instances",
                     "uuid1", 'submission.xml'),
                     media_file=f,
-                    forced_submission_time=datetime(2015, 12, 2))
+                    forced_submission_time=datetime(2015, 12, 2, tzinfo=utc))
 
             attachment_id = Attachment.objects.all().last().pk
 
@@ -4129,6 +4215,9 @@ class TestXFormViewSet(TestAbstractViewSet):
             alice_data = {'username': 'alice', 'email': 'alice@localhost.com'}
             alice_profile = self._create_user_profile(alice_data)
 
+            data_value = "editor|dataentry-minor"
+            MetaData.xform_meta_permission(self.xform, data_value=data_value)
+
             DataEntryMinorRole.add(alice_profile.user, self.xform)
 
             for i in self.xform.instances.all()[:2]:
@@ -4246,3 +4335,68 @@ class TestXFormViewSet(TestAbstractViewSet):
                 self._make_submission(s_path)
             xform = XForm.objects.last()
             self.assertEqual(xform.instances.count(), 6)
+
+    @override_settings(CELERY_ALWAYS_EAGER=False)
+    @patch('onadata.libs.utils.api_export_tools.AsyncResult')
+    def test_pending_export_async(self, async_result):
+        with HTTMock(enketo_mock):
+            self._publish_xls_form_to_project()
+            view = XFormViewSet.as_view({
+                'get': 'export_async',
+            })
+            formid = self.xform.pk
+            request = self.factory.get(
+                '/', data={"format": "csv"}, **self.extra)
+            response = view(request, pk=formid)
+            self.assertIsNotNone(response.data)
+            self.assertEqual(response.status_code, 202)
+            self.assertTrue('job_uuid' in response.data)
+            task_id = response.data.get('job_uuid')
+
+            request = self.factory.get(
+                '/', data={"format": "csv"}, **self.extra)
+            response = view(request, pk=formid)
+            self.assertIsNotNone(response.data)
+            self.assertEqual(response.status_code, 202)
+            self.assertTrue('job_uuid' in response.data)
+            task_id_two = response.data.get('job_uuid')
+
+            self.assertEqual(task_id, task_id_two)
+
+            get_data = {'job_uuid': task_id_two}
+            request = self.factory.get('/', data=get_data, **self.extra)
+            response = view(request, pk=formid)
+
+            self.assertTrue(async_result.called)
+            self.assertEqual(response.status_code, 202)
+            export = Export.objects.get(task_id=task_id)
+            self.assertTrue(export.is_pending)
+
+    @override_settings(CELERY_ALWAYS_EAGER=True)
+    @override_settings(EXPORT_TASK_PROGRESS_UPDATE_BATCH=1)
+    def test_export_async_progress_tracking(self):
+        with HTTMock(enketo_mock):
+            self._publish_xls_form_to_project()
+            self._make_submissions()
+
+            view = XFormViewSet.as_view({
+                'get': 'export_async',
+            })
+            formid = self.xform.pk
+            request = self.factory.get(
+                '/', data={"format": "xls"}, **self.extra)
+            response = view(request, pk=formid)
+            self.assertIsNotNone(response.data)
+            self.assertEqual(response.status_code, 202)
+            self.assertTrue('job_uuid' in response.data)
+            task_id = response.data.get('job_uuid')
+
+            get_data = {'job_uuid': task_id}
+            request = self.factory.get('/', data=get_data, **self.extra)
+            response = view(request, pk=formid)
+
+            self.assertEqual(response.status_code, 202)
+            self.assertIn('progress', response.data)
+            self.assertEqual(response.data.get('progress'), 4)
+            self.assertIn('total', response.data)
+            self.assertEqual(response.data.get('total'), 4)

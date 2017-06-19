@@ -1,3 +1,4 @@
+import json
 import os
 import random
 from datetime import datetime
@@ -12,18 +13,24 @@ from django.core.files.uploadedfile import InMemoryUploadedFile
 from django.db import IntegrityError
 from django.db.models import Prefetch
 from django.http import (HttpResponseBadRequest, HttpResponseForbidden,
-                         HttpResponseRedirect)
+                         HttpResponseRedirect, StreamingHttpResponse)
 from django.utils import six, timezone
 from django.utils.http import urlencode
 from django.utils.translation import ugettext as _
 from django.views.decorators.cache import never_cache
-from multidb.pinning import use_master
+
+from django_filters.rest_framework import DjangoFilterBackend
+
+try:
+    from multidb.pinning import use_master
+except ImportError:
+    pass
+
 from pyxform.builder import create_survey_element_from_dict
 from pyxform.xls2json import parse_file_to_json
 from rest_framework import exceptions, status
 from rest_framework.decorators import detail_route, list_route
 from rest_framework.exceptions import ParseError
-from rest_framework.filters import DjangoFilterBackend
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
 from rest_framework.viewsets import ModelViewSet
@@ -241,6 +248,14 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
             Prefetch('metadata_set'),
             Prefetch('tags'),
             Prefetch('dataview_set')
+        ).only(
+            'id', 'id_string', 'title', 'shared', 'shared_data',
+            'require_auth', 'created_by', 'num_of_submissions',
+            'downloadable', 'encrypted', 'sms_id_string',
+            'date_created', 'date_modified', 'last_submission_time',
+            'uuid', 'bamboo_dataset', 'instances_with_osm',
+            'instances_with_geopoints', 'version', 'has_hxl_support',
+            'project', 'last_updated_at', 'user', 'allows_sms', 'description'
         )
     serializer_class = XFormSerializer
     lookup_field = 'pk'
@@ -362,7 +377,8 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
     def enketo(self, request, **kwargs):
         self.object = self.get_object()
         form_url = get_form_url(
-            request, self.object.user.username, settings.ENKETO_PROTOCOL)
+            request, self.object.user.username, settings.ENKETO_PROTOCOL,
+            xform_pk=self.object.pk)
 
         data = {'message': _(u"Enketo not properly configured.")}
         http_status = status.HTTP_400_BAD_REQUEST
@@ -375,7 +391,8 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
             url = enketo_url(form_url, self.object.id_string, **defaults)
             preview_url = get_enketo_preview_url(request,
                                                  self.object.user.username,
-                                                 self.object.id_string)
+                                                 self.object.id_string,
+                                                 xform_pk=self.object.pk)
         except EnketoError as e:
             data = {'message': _(u"Enketo error: %s" % e)}
         else:
@@ -450,7 +467,7 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
         xform = self.get_object()
         export_type = kwargs.get('format') or \
             request.query_params.get('format')
-        query = request.query_params.get("query", {})
+        query = request.query_params.get("query")
         token = request.GET.get('token')
         meta = request.GET.get('meta')
 
@@ -555,10 +572,13 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
                     resp.update(submit_csv(request.user.username,
                                            self.object, csv_file))
                 else:
-                    tmp_file_path = utils.generate_tmp_path(csv_file)
+                    csv_file.seek(0)
+                    upload_to = os.path.join(request.user.username,
+                                             'csv_imports', csv_file.name)
+                    file_name = default_storage.save(upload_to, csv_file)
                     task = submit_csv_async.delay(request.user.username,
                                                   self.object,
-                                                  tmp_file_path)
+                                                  file_name)
                     if task is None:
                         raise ParseError('Task not found')
                     else:
@@ -579,14 +599,16 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
                                  'text_xls_form']) & set(request.data.keys()):
             return _try_update_xlsform(request, self.object, owner)
 
-        return super(XFormViewSet, self).partial_update(request, *args,
-                                                        **kwargs)
+        try:
+            return super(XFormViewSet, self).partial_update(request, *args,
+                                                            **kwargs)
+        except XLSFormError as e:
+            raise ParseError(str(e))
 
     @detail_route(methods=['DELETE', 'GET'])
     def delete_async(self, request, *args, **kwargs):
         if request.method == 'DELETE':
             xform = self.get_object()
-            xform.soft_delete()
             resp = {
                 u'job_uuid': tasks.delete_xform_async.delay(xform).task_id,
                 u'time_async_triggered': datetime.now()}
@@ -599,6 +621,12 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
             self.etag_data = '{}'.format(timezone.now())
 
         return Response(data=resp, status=resp_code)
+
+    def destroy(self, request, *args, **kwargs):
+        xform = self.get_object()
+        xform.soft_delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @detail_route(methods=['GET'])
     def export_async(self, request, *args, **kwargs):
@@ -616,15 +644,19 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
             'meta': meta,
             'token': token,
             'data_id': data_id,
-            'query': query,
         })
+        if query:
+            options.update({'query': query})
 
         if job_uuid:
             try:
                 resp = get_async_response(job_uuid, request, xform)
             except Export.DoesNotExist:
                 # if this does not exist retry it against the primary
-                with use_master:
+                try:
+                    with use_master:
+                        resp = get_async_response(job_uuid, request, xform)
+                except NameError:
                     resp = get_async_response(job_uuid, request, xform)
         else:
             resp = process_async_export(request, xform, export_type, options)
@@ -644,14 +676,56 @@ class XFormViewSet(AnonymousUserPublicFormsMixin,
                         status=status.HTTP_202_ACCEPTED,
                         content_type="application/json")
 
+    def _get_streaming_response(self, length):
+        """Get a StreamingHttpResponse response object
+
+        @param length ensures a valid JSON is generated, avoid a trailing comma
+        """
+        def stream_json(data, length):
+            """Generator function to stream JSON data"""
+            yield u"["
+            start = 1
+
+            for xform in self.object_list.iterator():
+                yield json.dumps(XFormBaseSerializer(
+                    instance=xform,
+                    context={'request': self.request}
+                ).data)
+                yield "" if start == length else ","
+                start += 1
+
+            yield u"]"
+
+        response = StreamingHttpResponse(
+            stream_json(self.object_list, length),
+            content_type="application/json"
+        )
+
+        # calculate etag value and add it to response headers
+        if hasattr(self, 'etag_data'):
+            self.set_etag_header(None, self.etag_data)
+
+        self.set_cache_control(response)
+
+        # set headers on streaming response
+        for k, v in self.headers.items():
+            response[k] = v
+
+        return response
+
     def list(self, request, *args, **kwargs):
+        STREAM_DATA = getattr(settings, 'STREAM_DATA', False)
         try:
             queryset = self.filter_queryset(self.get_queryset())
             last_modified = queryset.values_list('date_modified', flat=True)\
                 .order_by('-date_modified')
             if last_modified:
-                self.etag_data = last_modified[0]
-            resp = super(XFormViewSet, self).list(request, *args, **kwargs)
+                self.etag_data = last_modified[0].isoformat()
+            if STREAM_DATA:
+                self.object_list = queryset
+                resp = self._get_streaming_response(length=queryset.count())
+            else:
+                resp = super(XFormViewSet, self).list(request, *args, **kwargs)
         except XLSFormError, e:
             resp = HttpResponseBadRequest(e.message)
 

@@ -11,6 +11,7 @@ from django.conf import settings
 from django.core.files.temp import NamedTemporaryFile
 from openpyxl import load_workbook
 from pyxform.builder import create_survey_from_xls
+from pyxform.tests_v1.pyxform_test_case import PyxformTestCase
 from savReaderWriter import SavReader
 from savReaderWriter import SavHeaderReader
 
@@ -29,7 +30,7 @@ def _logger_fixture_path(*args):
                         'tests', 'fixtures', *args)
 
 
-class TestExportBuilder(TestBase):
+class TestExportBuilder(PyxformTestCase, TestBase):
     data = [
         {
             'name': 'Abe',
@@ -177,7 +178,7 @@ class TestExportBuilder(TestBase):
                 {
                     'childrenLg==info/nameLg==first': 'Mike',
                     'childrenLg==info/age': 5,
-                    'childrenLg==info/fav_colors': u'red\u2019s blue\u2019s',
+                    'childrenLg==info/fav_colors': u'red\'s blue\'s',
                     'childrenLg==info/ice_creams': 'vanilla chocolate',
                     'childrenLg==info/cartoons':
                     [
@@ -383,9 +384,9 @@ class TestExportBuilder(TestBase):
             expected_headers = ['children.info/name.first',
                                 'children.info/age',
                                 'children.info/fav_colors',
-                                u'children.info/fav_colors/red\u2019s',
-                                u'children.info/fav_colors/blue\u2019s',
-                                u'children.info/fav_colors/pink\u2019s',
+                                u'children.info/fav_colors/red\'s',
+                                u'children.info/fav_colors/blue\'s',
+                                u'children.info/fav_colors/pink\'s',
                                 'children.info/ice_creams',
                                 'children.info/ice_creams/vanilla',
                                 'children.info/ice_creams/strawberry',
@@ -399,15 +400,297 @@ class TestExportBuilder(TestBase):
             self.assertEqual(sorted(actual_headers), sorted(expected_headers))
             data = dict(zip(rows[0], rows[1]))
             self.assertEqual(
-                data[u'children.info/fav_colors/red\u2019s'.encode('utf-8')],
+                data[u'children.info/fav_colors/red\'s'.encode('utf-8')],
                 'True')
             self.assertEqual(
-                data[u'children.info/fav_colors/blue\u2019s'.encode('utf-8')],
+                data[u'children.info/fav_colors/blue\'s'.encode('utf-8')],
                 'True')
             self.assertEqual(
-                data[u'children.info/fav_colors/pink\u2019s'.encode('utf-8')],
+                data[u'children.info/fav_colors/pink\'s'.encode('utf-8')],
                 'False')
             # check that red and blue are set to true
+
+    def test_zipped_sav_export_with_date_field(self):
+        md = """
+        | survey |
+        |        | type              | name         | label        |
+        |        | date              | expense_date | Expense Date |
+        |        | begin group       | A            | A group      |
+        |        | date              | gdate        | Good Day     |
+        |        | end group         |              |              |
+
+        | choices |
+        |         | list name | name   | label  |
+        """
+        survey = self.md_to_pyxform_survey(md, {'name': 'exp'})
+        data = [{"expense_date": "2013-01-03", "A/gdate": "2017-06-13",
+                 '_submission_time': u'2016-11-21T03:43:43.000-08:00'}]
+        export_builder = ExportBuilder()
+        export_builder.set_survey(survey)
+        temp_zip_file = NamedTemporaryFile(suffix='.zip')
+        export_builder.to_zipped_sav(temp_zip_file.name, data)
+        temp_zip_file.seek(0)
+        temp_dir = tempfile.mkdtemp()
+        zip_file = zipfile.ZipFile(temp_zip_file.name, "r")
+        zip_file.extractall(temp_dir)
+        zip_file.close()
+        temp_zip_file.close()
+        # check that the children's file (which has the unicode header) exists
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(temp_dir, "exp.sav")))
+        # check file's contents
+
+        with SavReader(os.path.join(temp_dir, "exp.sav"),
+                       returnHeader=True) as reader:
+            rows = [r for r in reader]
+            self.assertTrue(len(rows) > 1)
+            self.assertEqual(rows[0][0],  'expense_date')
+            self.assertEqual(rows[1][0],  '2013-01-03')
+            self.assertEqual(rows[0][1],  'A.gdate')
+            self.assertEqual(rows[1][1],  '2017-06-13')
+            self.assertEqual(rows[0][5], '@_submission_time')
+            self.assertEqual(rows[1][5], '2016-11-21 03:43:43')
+
+        shutil.rmtree(temp_dir)
+
+    def test_zipped_sav_export_with_zero_padded_select_one_field(self):
+        md = """
+        | survey |
+        |        | type              | name         | label        |
+        |        | select one yes_no | expensed     | Expensed?    |
+
+        | choices |
+        |         | list name | name   | label  |
+        |         | yes_no    | 1      | Yes    |
+        |         | yes_no    | 09      | No     |
+        """
+        survey = self.md_to_pyxform_survey(md, {'name': 'exp'})
+        data = [{"expensed": "09",
+                 '_submission_time': u'2016-11-21T03:43:43.000-08:00'}]
+        export_builder = ExportBuilder()
+        export_builder.set_survey(survey)
+        temp_zip_file = NamedTemporaryFile(suffix='.zip')
+        export_builder.to_zipped_sav(temp_zip_file.name, data)
+        temp_zip_file.seek(0)
+        temp_dir = tempfile.mkdtemp()
+        zip_file = zipfile.ZipFile(temp_zip_file.name, "r")
+        zip_file.extractall(temp_dir)
+        zip_file.close()
+        temp_zip_file.close()
+        # check that the children's file (which has the unicode header) exists
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(temp_dir, "exp.sav")))
+        # check file's contents
+
+        with SavReader(os.path.join(temp_dir, "exp.sav"),
+                       returnHeader=True) as reader:
+            rows = [r for r in reader]
+            self.assertTrue(len(rows) > 1)
+            self.assertEqual(rows[1][0],  "09")
+            self.assertEqual(rows[1][4], '2016-11-21 03:43:43')
+
+    def test_zipped_sav_export_with_numeric_select_one_field(self):
+        md = """
+        | survey |
+        |        | type              | name         | label        |
+        |        | select one yes_no | expensed     | Expensed?    |
+        |        | begin group       | A            | A            |
+        |        | select one yes_no | q1           | Q1           |
+        |        | end group         |              |              |
+
+        | choices |
+        |         | list name | name   | label  |
+        |         | yes_no    | 1      | Yes    |
+        |         | yes_no    | 0      | No     |
+        """
+        survey = self.md_to_pyxform_survey(md, {'name': 'exp'})
+        data = [{"expensed": "1", "A/q1": "1",
+                 '_submission_time': u'2016-11-21T03:43:43.000-08:00'}]
+        export_builder = ExportBuilder()
+        export_builder.set_survey(survey)
+        temp_zip_file = NamedTemporaryFile(suffix='.zip')
+        export_builder.to_zipped_sav(temp_zip_file.name, data)
+        temp_zip_file.seek(0)
+        temp_dir = tempfile.mkdtemp()
+        zip_file = zipfile.ZipFile(temp_zip_file.name, "r")
+        zip_file.extractall(temp_dir)
+        zip_file.close()
+        temp_zip_file.close()
+        # check that the children's file (which has the unicode header) exists
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(temp_dir, "exp.sav")))
+        # check file's contents
+
+        with SavReader(os.path.join(temp_dir, "exp.sav"),
+                       returnHeader=True) as reader:
+            rows = [r for r in reader]
+            self.assertTrue(len(rows) > 1)
+
+            # expensed 1
+            self.assertEqual(rows[0][0],  'expensed')
+            self.assertEqual(rows[1][0],  1)
+
+            # A/q1 1
+            self.assertEqual(rows[0][1],  'A.q1')
+            self.assertEqual(rows[1][1],  1)
+
+            # _submission_time is a date string
+            self.assertEqual(rows[0][5], '@_submission_time')
+            self.assertEqual(rows[1][5], '2016-11-21 03:43:43')
+
+    def test_zipped_sav_export_with_numeric_select_multiple_field(self):
+        md = """
+        | survey |
+        |        | type                   | name         | label        |
+        |        | select_multiple yes_no | expensed     | Expensed?    |
+        |        | begin group            | A            | A            |
+        |        | select_multiple yes_no | q1           | Q1           |
+        |        | end group              |              |              |
+
+        | choices |
+        |         | list name | name   | label  |
+        |         | yes_no    | 1      | Yes    |
+        |         | yes_no    | 0      | No     |
+        """
+        survey = self.md_to_pyxform_survey(md, {'name': 'exp'})
+        data = [{"expensed": "1", "A/q1": "1",
+                 '_submission_time': u'2016-11-21T03:43:43.000-08:00'}]
+        export_builder = ExportBuilder()
+        export_builder.set_survey(survey)
+        temp_zip_file = NamedTemporaryFile(suffix='.zip')
+        export_builder.to_zipped_sav(temp_zip_file.name, data)
+        temp_zip_file.seek(0)
+        temp_dir = tempfile.mkdtemp()
+        zip_file = zipfile.ZipFile(temp_zip_file.name, "r")
+        zip_file.extractall(temp_dir)
+        zip_file.close()
+        temp_zip_file.close()
+        # check that the children's file (which has the unicode header) exists
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(temp_dir, "exp.sav")))
+        # check file's contents
+
+        with SavReader(os.path.join(temp_dir, "exp.sav"),
+                       returnHeader=True) as reader:
+            rows = [r for r in reader]
+            self.assertTrue(len(rows) > 1)
+
+            self.assertEqual(rows[0][0],  "expensed")
+            self.assertEqual(rows[1][0],  "1")
+
+            # expensed.1 is selected hence True, 1.00 or 1 in SPSS
+            self.assertEqual(rows[0][1],  "expensed.1")
+            self.assertEqual(rows[1][1], 1)
+
+            # expensed.0 is not selected hence False, .00 or 0 in SPSS
+            self.assertEqual(rows[0][2],  "expensed.0")
+            self.assertEqual(rows[1][2], 0)
+
+            self.assertEqual(rows[0][3],  "A.q1")
+            self.assertEqual(rows[1][3],  "1")
+
+            # expensed.1 is selected hence True, 1.00 or 1 in SPSS
+            self.assertEqual(rows[0][4],  "A.q1.1")
+            self.assertEqual(rows[1][4], 1)
+
+            # expensed.0 is not selected hence False, .00 or 0 in SPSS
+            self.assertEqual(rows[0][5],  "A.q1.0")
+            self.assertEqual(rows[1][5], 0)
+
+            self.assertEqual(rows[0][9],  "@_submission_time")
+            self.assertEqual(rows[1][9], '2016-11-21 03:43:43')
+
+        shutil.rmtree(temp_dir)
+
+    def test_zipped_sav_export_with_zero_padded_select_multiple_field(self):
+        md = """
+        | survey |
+        |        | type              | name         | label        |
+        |        | select_multiple yes_no | expensed     | Expensed?    |
+
+        | choices |
+        |         | list name | name   | label  |
+        |         | yes_no    | 1      | Yes    |
+        |         | yes_no    | 09     | No     |
+        """
+        survey = self.md_to_pyxform_survey(md, {'name': 'exp'})
+        data = [{"expensed": "1",
+                 '_submission_time': u'2016-11-21T03:43:43.000-08:00'}]
+        export_builder = ExportBuilder()
+        export_builder.set_survey(survey)
+        temp_zip_file = NamedTemporaryFile(suffix='.zip')
+        export_builder.to_zipped_sav(temp_zip_file.name, data)
+        temp_zip_file.seek(0)
+        temp_dir = tempfile.mkdtemp()
+        zip_file = zipfile.ZipFile(temp_zip_file.name, "r")
+        zip_file.extractall(temp_dir)
+        zip_file.close()
+        temp_zip_file.close()
+        # check that the children's file (which has the unicode header) exists
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(temp_dir, "exp.sav")))
+        # check file's contents
+
+        with SavReader(os.path.join(temp_dir, "exp.sav"),
+                       returnHeader=True) as reader:
+            rows = [r for r in reader]
+            self.assertTrue(len(rows) > 1)
+            self.assertEqual(rows[1][0],  "1")
+            # expensed.1 is selected hence True, 1.00 or 1 in SPSS
+            self.assertEqual(rows[1][1], 1)
+            # expensed.0 is not selected hence False, .00 or 0 in SPSS
+            self.assertEqual(rows[1][2], 0)
+            self.assertEqual(rows[1][6], '2016-11-21 03:43:43')
+
+        shutil.rmtree(temp_dir)
+
+    def test_zipped_sav_export_with_values_split_select_multiple(self):
+        md = """
+        | survey |
+        |        | type              | name         | label        |
+        |        | select_multiple yes_no | expensed     | Expensed?    |
+
+        | choices |
+        |         | list name | name   | label  |
+        |         | yes_no    | 2      | Yes    |
+        |         | yes_no    | 09     | No     |
+        """
+        survey = self.md_to_pyxform_survey(md, {'name': 'exp'})
+        data = [{"expensed": "2 09",
+                 '_submission_time': u'2016-11-21T03:43:43.000-08:00'}]
+        export_builder = ExportBuilder()
+        export_builder.VALUE_SELECT_MULTIPLES = True
+        export_builder.set_survey(survey)
+        temp_zip_file = NamedTemporaryFile(suffix='.zip')
+        export_builder.to_zipped_sav(temp_zip_file.name, data)
+        temp_zip_file.seek(0)
+        temp_dir = tempfile.mkdtemp()
+        zip_file = zipfile.ZipFile(temp_zip_file.name, "r")
+        zip_file.extractall(temp_dir)
+        zip_file.close()
+        temp_zip_file.close()
+        # check that the children's file (which has the unicode header) exists
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(temp_dir, "exp.sav")))
+        # check file's contents
+
+        with SavReader(os.path.join(temp_dir, "exp.sav"),
+                       returnHeader=True) as reader:
+            rows = [r for r in reader]
+            self.assertTrue(len(rows) > 1)
+            self.assertEqual(rows[1][0],  "2 09")
+            # expensed.1 is selected hence True, 1.00 or 1 in SPSS
+            self.assertEqual(rows[1][1], 2)
+            # expensed.0 is not selected hence False, .00 or 0 in SPSS
+            self.assertEqual(rows[1][2], '09')
+            self.assertEqual(rows[1][6], '2016-11-21 03:43:43')
+
         shutil.rmtree(temp_dir)
 
     def test_xls_export_works_with_unicode(self):
@@ -418,13 +701,13 @@ class TestExportBuilder(TestBase):
         temp_xls_file = NamedTemporaryFile(suffix='.xlsx')
         export_builder.to_xls_export(temp_xls_file.name, self.data_utf8)
         temp_xls_file.seek(0)
-        # check that values for red\u2019s and blue\u2019s are set to true
+        # check that values for red\'s and blue\'s are set to true
         wb = load_workbook(temp_xls_file.name)
         children_sheet = wb.get_sheet_by_name("children.info")
         data = dict([(r[0].value, r[1].value) for r in children_sheet.columns])
-        self.assertTrue(data[u'children.info/fav_colors/red\u2019s'])
-        self.assertTrue(data[u'children.info/fav_colors/blue\u2019s'])
-        self.assertFalse(data[u'children.info/fav_colors/pink\u2019s'])
+        self.assertTrue(data[u'children.info/fav_colors/red\'s'])
+        self.assertTrue(data[u'children.info/fav_colors/blue\'s'])
+        self.assertFalse(data[u'children.info/fav_colors/pink\'s'])
         temp_xls_file.close()
 
     def test_xls_export_with_hxl_adds_extra_row(self):
@@ -455,8 +738,10 @@ class TestExportBuilder(TestBase):
         wb = load_workbook(temp_xls_file.name)
         children_sheet = wb.get_sheet_by_name("hxl_example")
         self.assertTrue(children_sheet)
+
         # we pick the second row because the first row has xform fieldnames
-        hxl_row = [a.value for a in children_sheet.rows[1]]
+        rows = [row for row in children_sheet.rows]
+        hxl_row = [a.value for a in rows[1]]
         self.assertIn(u'#age', hxl_row)
 
     def test_generation_of_multi_selects_works(self):
@@ -914,13 +1199,13 @@ class TestExportBuilder(TestBase):
         ws1 = wb.get_sheet_by_name('childrens_survey_with_a_very_l1')
 
         # parent_table is in cell K2
-        parent_table_name = ws1.cell('K2').value
+        parent_table_name = ws1['K2'].value
         expected_parent_table_name = 'childrens_survey_with_a_very_lo'
         self.assertEqual(parent_table_name, expected_parent_table_name)
 
         # get cartoons sheet
         ws2 = wb.get_sheet_by_name('childrens_survey_with_a_very_l2')
-        parent_table_name = ws2.cell('G2').value
+        parent_table_name = ws2['G2'].value
         expected_parent_table_name = 'childrens_survey_with_a_very_l1'
         self.assertEqual(parent_table_name, expected_parent_table_name)
         xls_file.close()
@@ -1165,13 +1450,13 @@ class TestExportBuilder(TestBase):
         temp_xls_file = NamedTemporaryFile(suffix='.xlsx')
         export_builder.to_xls_export(temp_xls_file.name, self.data_utf8)
         temp_xls_file.seek(0)
-        # check that values for red\u2019s and blue\u2019s are set to true
+        # check that values for red\'s and blue\'s are set to true
         wb = load_workbook(temp_xls_file.name)
         children_sheet = wb.get_sheet_by_name("children.info")
         data = dict([(r[0].value, r[1].value) for r in children_sheet.columns])
-        self.assertTrue(data[u'fav_colors/red\u2019s'])
-        self.assertTrue(data[u'fav_colors/blue\u2019s'])
-        self.assertFalse(data[u'fav_colors/pink\u2019s'])
+        self.assertTrue(data[u"fav_colors/red's"])
+        self.assertTrue(data[u"fav_colors/blue's"])
+        self.assertFalse(data[u"fav_colors/pink's"])
         temp_xls_file.close()
 
     def test_zipped_csv_export_remove_group_name(self):
@@ -1201,9 +1486,9 @@ class TestExportBuilder(TestBase):
             expected_headers = ['name.first',
                                 'age',
                                 'fav_colors',
-                                u'fav_colors/red\u2019s',
-                                u'fav_colors/blue\u2019s',
-                                u'fav_colors/pink\u2019s',
+                                u'fav_colors/red\'s',
+                                u'fav_colors/blue\'s',
+                                u'fav_colors/pink\'s',
                                 'ice_creams',
                                 'ice_creams/vanilla',
                                 'ice_creams/strawberry',
@@ -1217,13 +1502,13 @@ class TestExportBuilder(TestBase):
             self.assertEqual(sorted(actual_headers), sorted(expected_headers))
             data = dict(zip(rows[0], rows[1]))
             self.assertEqual(
-                data[u'fav_colors/red\u2019s'.encode('utf-8')],
+                data[u'fav_colors/red\'s'.encode('utf-8')],
                 'True')
             self.assertEqual(
-                data[u'fav_colors/blue\u2019s'.encode('utf-8')],
+                data[u'fav_colors/blue\'s'.encode('utf-8')],
                 'True')
             self.assertEqual(
-                data[u'fav_colors/pink\u2019s'.encode('utf-8')],
+                data[u'fav_colors/pink\'s'.encode('utf-8')],
                 'False')
             # check that red and blue are set to true
         shutil.rmtree(temp_dir)
@@ -1238,23 +1523,23 @@ class TestExportBuilder(TestBase):
         temp_xls_file = NamedTemporaryFile(suffix='.xlsx')
         export_builder.to_xls_export(temp_xls_file.name, self.data_utf8)
         temp_xls_file.seek(0)
-        # check that values for red\u2019s and blue\u2019s are set to true
+        # check that values for red\'s and blue\'s are set to true
         wb = load_workbook(temp_xls_file.name)
         children_sheet = wb.get_sheet_by_name("children.info")
         labels = dict([(r[0].value, r[1].value)
                        for r in children_sheet.columns])
         self.assertEqual(labels[u'name.first'], '3.1 Childs name')
         self.assertEqual(labels[u'age'], '3.2 Child age')
-        self.assertEqual(labels[u'fav_colors/red\u2019s'], 'fav_colors/Red')
-        self.assertEqual(labels[u'fav_colors/blue\u2019s'], 'fav_colors/Blue')
-        self.assertEqual(labels[u'fav_colors/pink\u2019s'], 'fav_colors/Pink')
+        self.assertEqual(labels[u'fav_colors/red\'s'], 'fav_colors/Red')
+        self.assertEqual(labels[u'fav_colors/blue\'s'], 'fav_colors/Blue')
+        self.assertEqual(labels[u'fav_colors/pink\'s'], 'fav_colors/Pink')
 
         data = dict([(r[0].value, r[2].value) for r in children_sheet.columns])
         self.assertEqual(data[u'name.first'], 'Mike')
         self.assertEqual(data[u'age'], 5)
-        self.assertTrue(data[u'fav_colors/red\u2019s'])
-        self.assertTrue(data[u'fav_colors/blue\u2019s'])
-        self.assertFalse(data[u'fav_colors/pink\u2019s'])
+        self.assertTrue(data[u'fav_colors/red\'s'])
+        self.assertTrue(data[u'fav_colors/blue\'s'])
+        self.assertFalse(data[u'fav_colors/pink\'s'])
         temp_xls_file.close()
 
     def test_xls_export_with_labels_only(self):
@@ -1267,7 +1552,7 @@ class TestExportBuilder(TestBase):
         temp_xls_file = NamedTemporaryFile(suffix='.xlsx')
         export_builder.to_xls_export(temp_xls_file.name, self.data_utf8)
         temp_xls_file.seek(0)
-        # check that values for red\u2019s and blue\u2019s are set to true
+        # check that values for red\'s and blue\'s are set to true
         wb = load_workbook(temp_xls_file.name)
         children_sheet = wb.get_sheet_by_name("children.info")
         data = dict([(r[0].value, r[1].value) for r in children_sheet.columns])
@@ -1306,9 +1591,9 @@ class TestExportBuilder(TestBase):
             expected_headers = ['name.first',
                                 'age',
                                 'fav_colors',
-                                u'fav_colors/red\u2019s',
-                                u'fav_colors/blue\u2019s',
-                                u'fav_colors/pink\u2019s',
+                                u'fav_colors/red\'s',
+                                u'fav_colors/blue\'s',
+                                u'fav_colors/pink\'s',
                                 'ice_creams',
                                 'ice_creams/vanilla',
                                 'ice_creams/strawberry',
@@ -1338,13 +1623,13 @@ class TestExportBuilder(TestBase):
             self.assertEqual(sorted(actual_labels), sorted(expected_labels))
             data = dict(zip(rows[0], rows[2]))
             self.assertEqual(
-                data[u'fav_colors/red\u2019s'.encode('utf-8')],
+                data[u'fav_colors/red\'s'.encode('utf-8')],
                 'True')
             self.assertEqual(
-                data[u'fav_colors/blue\u2019s'.encode('utf-8')],
+                data[u'fav_colors/blue\'s'.encode('utf-8')],
                 'True')
             self.assertEqual(
-                data[u'fav_colors/pink\u2019s'.encode('utf-8')],
+                data[u'fav_colors/pink\'s'.encode('utf-8')],
                 'False')
             # check that red and blue are set to true
         shutil.rmtree(temp_dir)

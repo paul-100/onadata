@@ -27,6 +27,7 @@ from registration.models import RegistrationProfile
 from rest_framework import exceptions
 from taggit.forms import TagField
 
+from onadata.libs.models.share_project import ShareProject
 from onadata.libs.permissions import get_role
 from onadata.libs.permissions import is_organization
 from onadata.apps.api.models.organization_profile import OrganizationProfile
@@ -38,9 +39,11 @@ from onadata.apps.logger.models.xform import XForm
 from onadata.apps.viewer.models.export import Export
 from onadata.apps.viewer.models.parsed_instance import datetime_from_str
 from onadata.libs.utils.api_export_tools import custom_response_handler
+from onadata.libs.utils.cache_tools import (
+    safe_delete, PROJ_FORMS_CACHE, PROJ_BASE_FORMS_CACHE)
 from onadata.libs.utils.logger_tools import publish_form
 from onadata.libs.utils.logger_tools import response_with_mimetype_and_name
-from onadata.libs.utils.project_utils import set_project_perms_to_xform
+from onadata.libs.utils.project_utils import set_project_perms_to_xform_async
 from onadata.libs.utils.user_auth import check_and_set_form_by_id
 from onadata.libs.utils.user_auth import check_and_set_form_by_id_string
 from onadata.libs.permissions import ROLES
@@ -171,6 +174,11 @@ def remove_user_from_organization(organization, user):
     remove_user_from_team(team, user)
     owners_team = get_organization_owners_team(organization)
     remove_user_from_team(owners_team, user)
+
+    role = get_role_in_org(user, organization)
+    # Remove user from all org projects
+    for project in organization.user.project_org.all():
+        ShareProject(project, user.username, role, remove=True).save()
 
 
 def remove_user_from_team(team, user):
@@ -330,6 +338,8 @@ def publish_project_xform(request, project):
 
     if 'formid' in request.data:
         xform = get_object_or_404(XForm, pk=request.data.get('formid'))
+        safe_delete('{}{}'.format(PROJ_FORMS_CACHE, xform.project.pk))
+        safe_delete('{}{}'.format(PROJ_BASE_FORMS_CACHE, xform.project.pk))
         if not ManagerRole.user_has_role(request.user, xform):
             raise exceptions.PermissionDenied(_(
                 "{} has no manager/owner role to the form {}". format(
@@ -350,7 +360,7 @@ def publish_project_xform(request, project):
                 xform.save()
         except IntegrityError:
             raise exceptions.ParseError(_(msg))
-        set_project_perms_to_xform(xform, project)
+        set_project_perms_to_xform_async.delay(xform.pk, project.pk)
     else:
         xform = publish_form(set_form)
 
@@ -462,22 +472,24 @@ def check_inherit_permission_from_project(xform_id, user):
         return
 
     # get the project_xform
-    xforms = XForm.objects.filter(pk=xform_id).select_related('project')
+    xform = XForm.objects.filter(pk=xform_id).select_related('project').only(
+        'project_id', 'id'
+    ).first()
 
-    if not xforms:
+    if not xform:
         return
 
     # ignore if forms has meta perms set
-    if xforms[0].metadata_set.filter(data_type='xform_meta_perms'):
+    if xform.metadata_set.filter(data_type='xform_meta_perms'):
         return
 
     # get and compare the project role to the xform role
-    project_role = get_role_in_org(user, xforms[0].project)
-    xform_role = get_role_in_org(user, xforms[0])
+    project_role = get_role_in_org(user, xform.project)
+    xform_role = get_role_in_org(user, xform)
 
     # if diff set the project role to the xform
     if xform_role != project_role:
-        _set_xform_permission(project_role, user, xforms[0])
+        _set_xform_permission(project_role, user, xform)
 
 
 def _set_xform_permission(role, user, xform):

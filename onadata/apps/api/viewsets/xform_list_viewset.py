@@ -42,7 +42,8 @@ class XFormListViewSet(ETagsMixin, BaseViewset,
     authentication_classes = (DigestAuthentication,
                               EnketoTokenAuthentication,)
     content_negotiation_class = MediaFileContentNegotiation
-    filter_backends = (filters.XFormListObjectPermissionFilter,)
+    filter_backends = (filters.XFormListObjectPermissionFilter,
+                       filters.XFormListXFormPKFilter)
     queryset = XForm.objects.filter(downloadable=True, deleted_at=None)
     permission_classes = (permissions.AllowAny,)
     renderer_classes = (XFormListRenderer,)
@@ -64,6 +65,9 @@ class XFormListViewSet(ETagsMixin, BaseViewset,
         filter_kwargs = {self.lookup_field: self.kwargs[self.lookup_field]}
         obj = get_object_or_404(queryset or XForm, **filter_kwargs)
         self.check_object_permissions(self.request, obj)
+
+        if self.request.user.is_anonymous() and obj.require_auth:
+            self.permission_denied(self.request)
 
         return obj
 
@@ -93,8 +97,8 @@ class XFormListViewSet(ETagsMixin, BaseViewset,
 
         if not self.request.user.is_anonymous():
             queryset = super(XFormListViewSet, self).filter_queryset(queryset)
-
-            if self.action == 'list' and profile:
+            xform_pk = self.kwargs.get('xform_pk')
+            if self.action == 'list' and profile and xform_pk is None:
                 forms_shared_with_user = get_forms_shared_with_user(
                     profile.user)
                 queryset = queryset | forms_shared_with_user
@@ -110,6 +114,9 @@ class XFormListViewSet(ETagsMixin, BaseViewset,
         self.object_list = self.filter_queryset(self.get_queryset())
 
         serializer = self.get_serializer(self.object_list, many=True)
+        if request.method in ['HEAD']:
+            return Response('', headers=self.get_openrosa_headers(),
+                            status=204)
 
         return Response(serializer.data, headers=self.get_openrosa_headers())
 
@@ -118,7 +125,7 @@ class XFormListViewSet(ETagsMixin, BaseViewset,
 
         return Response(self.object.xml, headers=self.get_openrosa_headers())
 
-    @detail_route(methods=['GET'])
+    @detail_route(methods=['GET', 'HEAD'])
     def manifest(self, request, *args, **kwargs):
         self.object = self.get_object()
         object_list = MetaData.objects.filter(data_type='media',
@@ -130,7 +137,7 @@ class XFormListViewSet(ETagsMixin, BaseViewset,
 
         return Response(serializer.data, headers=self.get_openrosa_headers())
 
-    @detail_route(methods=['GET'])
+    @detail_route(methods=['GET', 'HEAD'])
     def media(self, request, *args, **kwargs):
         self.object = self.get_object()
         pk = kwargs.get('metadata')

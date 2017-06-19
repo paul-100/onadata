@@ -54,23 +54,34 @@ class TestXForm(PyxformTestCase, TestBase):
 
         self.assertTrue(len(xform.version) > 12)
 
-    def test_soft_delete_sets_deleted_at(self):
+    def test_soft_delete(self):
         self._publish_transportation_form_and_submit_instance()
         xform = XForm.objects.get(pk=self.xform.id)
+
+        # deleted_at is None
         self.assertIsNone(xform.deleted_at)
 
-        xform.soft_delete()
+        # is active
+        self.assertTrue(xform.downloadable)
 
-        self.assertIsNotNone(xform.deleted_at)
-
-    def test_soft_delete_sets_deletion_suffix_on_id_strings(self):
-        self._publish_transportation_form_and_submit_instance()
-        xform = XForm.objects.get(pk=self.xform.id)
+        # deleted-at suffix not present
         self.assertNotIn("-deleted-at-", xform.id_string)
         self.assertNotIn("-deleted-at-", xform.sms_id_string)
 
-        xform.soft_delete()
+        # '&' should raise an XLSFormError exception when being changed, for
+        # deletions this should not raise any exception however
+        xform.title = 'Trial & Error'
 
+        xform.soft_delete()
+        xform.reload()
+
+        # deleted_at is not None
+        self.assertIsNotNone(xform.deleted_at)
+
+        # is inactive, no submissions will be allowed
+        self.assertFalse(xform.downloadable)
+
+        # deleted-at suffix is present
         self.assertIn("-deleted-at-", xform.id_string)
         self.assertIn("-deleted-at-", xform.sms_id_string)
 
@@ -114,3 +125,5 @@ class TestXForm(PyxformTestCase, TestBase):
 
         fruitb_o = xform.get_survey_element("b/fruitb/orange")
         self.assertEqual(fruitb_o.get_abbreviated_xpath(), "b/fruitb/orange")
+
+        self.assertEqual(xform.get_child_elements('NoneExistent'), [])

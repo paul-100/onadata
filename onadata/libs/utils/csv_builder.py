@@ -20,6 +20,7 @@ from onadata.libs.utils.common_tags import (ATTACHMENTS, BAMBOO_DATASET_ID,
                                             SUBMITTED_BY, TAGS, UUID, VERSION,
                                             XFORM_ID_STRING)
 from onadata.libs.utils.export_builder import get_value_or_attachment_uri
+from onadata.libs.utils.export_builder import track_task_progress
 from onadata.libs.utils.model_tools import get_columns_with_hxl
 
 # the bind type of select multiples that we use to compare
@@ -31,6 +32,7 @@ GROUP_DELIMITER_SLASH = '/'
 GROUP_DELIMITER_DOT = '.'
 DEFAULT_GROUP_DELIMITER = GROUP_DELIMITER_SLASH
 GROUP_DELIMITERS = [GROUP_DELIMITER_SLASH, GROUP_DELIMITER_DOT]
+DEFAULT_NA_REP = getattr(settings, 'NA_REP', NA_REP)
 
 
 def remove_dups_from_list_maintain_order(l):
@@ -86,7 +88,7 @@ def write_to_csv(path, rows, columns, columns_with_hxl=None,
                  remove_group_name=False, dd=None,
                  group_delimiter=DEFAULT_GROUP_DELIMITER, include_labels=False,
                  include_labels_only=False, include_hxl=False,
-                 win_excel_utf8=False):
+                 win_excel_utf8=False, total_records=None):
     na_rep = getattr(settings, 'NA_REP', NA_REP)
     encoding = 'utf-8-sig' if win_excel_utf8 else 'utf-8'
     with open(path, 'wb') as csvfile:
@@ -116,10 +118,11 @@ def write_to_csv(path, rows, columns, columns_with_hxl=None,
             hxl_row = [columns_with_hxl.get(col, '') for col in columns]
             hxl_row and writer.writerow(hxl_row)
 
-        for row in rows:
+        for i, row in enumerate(rows, start=1):
             for col in AbstractDataFrameBuilder.IGNORED_COLUMNS:
                 row.pop(col, None)
             writer.writerow([row.get(col, na_rep) for col in columns])
+            track_task_progress(i, total_records)
 
 
 class AbstractDataFrameBuilder(object):
@@ -140,7 +143,7 @@ class AbstractDataFrameBuilder(object):
                  start=None, end=None, remove_group_name=False, xform=None,
                  include_labels=False, include_labels_only=False,
                  include_images=True, include_hxl=False,
-                 win_excel_utf8=False):
+                 win_excel_utf8=False, total_records=None):
 
         self.username = username
         self.id_string = id_string
@@ -163,6 +166,7 @@ class AbstractDataFrameBuilder(object):
         self.include_hxl = include_hxl
         self.win_excel_utf8 = win_excel_utf8
         self._setup()
+        self.total_records = total_records
 
     def _setup(self):
         self.dd = self.xform
@@ -319,12 +323,12 @@ class CSVDataFrameBuilder(AbstractDataFrameBuilder):
                  start=None, end=None, remove_group_name=False, xform=None,
                  include_labels=False, include_labels_only=False,
                  include_images=False, include_hxl=False,
-                 win_excel_utf8=False):
+                 win_excel_utf8=False, total_records=None):
         super(CSVDataFrameBuilder, self).__init__(
             username, id_string, filter_query, group_delimiter,
             split_select_multiples, binary_select_multiples, start, end,
             remove_group_name, xform, include_labels, include_labels_only,
-            include_images, include_hxl, win_excel_utf8
+            include_images, include_hxl, win_excel_utf8, total_records
 
         )
         self.ordered_columns = OrderedDict()
@@ -345,8 +349,7 @@ class CSVDataFrameBuilder(AbstractDataFrameBuilder):
 
             for elem in children:
                 xp = elem.get_abbreviated_xpath()
-                if xp in repeat_value:
-                    item[xp] = repeat_value[xp]
+                item[xp] = repeat_value.get(xp, DEFAULT_NA_REP)
 
             return item
 
@@ -369,11 +372,15 @@ class CSVDataFrameBuilder(AbstractDataFrameBuilder):
                         # abbreviated xpath
                         # "children/details/immunization/polio_1",
                         # generate ["children", index, "immunization/polio_1"]
-                        xpaths = [
-                            "%s[%s]" % (
-                                nested_key[:nested_key.index(key) + len(key)],
-                                index),
-                            nested_key[nested_key.index(key) + len(key) + 1:]]
+                        if parent_prefix is not None:
+                            _key = '/'.join(
+                                parent_prefix +
+                                key.split('/')[len(parent_prefix):])
+                            xpaths = ['%s[%d]' % (_key, index)] + \
+                                nested_key.split('/')[len(_key.split('/')):]
+                        else:
+                            xpaths = ['%s[%d]' % (key, index)] + \
+                                nested_key.split('/')[len(key.split('/')):]
                         # re-create xpath the split on /
                         xpaths = "/".join(xpaths).split("/")
                         new_prefix = xpaths[:-1]
@@ -387,8 +394,6 @@ class CSVDataFrameBuilder(AbstractDataFrameBuilder):
                         else:
                             # it can only be a scalar
                             # collapse xpath
-                            if parent_prefix:
-                                xpaths[0:len(parent_prefix)] = parent_prefix
                             new_xpath = u"/".join(xpaths)
                             # check if this key exists in our ordered columns
                             if key in ordered_columns.keys():
@@ -556,4 +561,5 @@ class CSVDataFrameBuilder(AbstractDataFrameBuilder):
                      include_labels=self.include_labels,
                      include_labels_only=self.include_labels_only,
                      include_hxl=self.include_hxl,
-                     win_excel_utf8=self.win_excel_utf8)
+                     win_excel_utf8=self.win_excel_utf8,
+                     total_records=self.total_records)

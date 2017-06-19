@@ -5,6 +5,7 @@ import os
 import re
 import time
 from datetime import datetime
+from datetime import timedelta
 from urlparse import urlparse
 
 from django.conf import settings
@@ -15,6 +16,7 @@ from django.core.files.temp import NamedTemporaryFile
 from django.db import OperationalError
 from django.db.models.query import QuerySet
 from django.shortcuts import render_to_response
+from django.utils import timezone
 from json2xlsclient.client import Client
 from savReaderWriter import SPSSIOError
 
@@ -101,20 +103,22 @@ def get_export_options(options):
         key: value for key, value in options.iteritems()
         if key in Export.EXPORT_OPTION_FIELDS}
 
-    if EXPORT_QUERY_KEY in export_options:
-        query_str = '{}'.format(export_options[EXPORT_QUERY_KEY])
-
-        export_options[EXPORT_QUERY_KEY] = md5hash(query_str)
-
     return export_options
 
 
 def get_or_create_export(export_id, xform, export_type, options):
     if export_id:
         try:
-            return Export.objects.get(id=export_id)
+            return Export.objects.get(pk=export_id)
         except Export.DoesNotExist:
-            pass
+            if len(getattr(settings, 'SLAVE_DATABASES', [])):
+                from multidb.pinning import use_master
+
+                with use_master:
+                    try:
+                        return Export.objects.get(pk=export_id)
+                    except Export.DoesNotExist:
+                        pass
 
     return create_export_object(xform, export_type, options)
 
@@ -162,8 +166,16 @@ def generate_export(export_type, xform, export_id=None, options=None,
     if options.get("dataview_pk"):
         dataview = DataView.objects.get(pk=options.get("dataview_pk"))
         records = dataview.query_data(dataview, all_data=True)
+        total_records = dataview.query_data(dataview,
+                                            count=True)[0].get('count')
     else:
         records = query_data(xform, query=filter_query, start=start, end=end)
+
+        if filter_query:
+            total_records = query_data(xform, query=filter_query, start=start,
+                                       end=end, count=True)[0].get('count')
+        else:
+            total_records = xform.num_of_submissions
 
     if isinstance(records, QuerySet):
         records = records.iterator()
@@ -190,6 +202,9 @@ def generate_export(export_type, xform, export_id=None, options=None,
     export_builder.INCLUDE_IMAGES \
         = options.get("include_images", settings.EXPORT_WITH_IMAGE_DEFAULT)
 
+    export_builder.VALUE_SELECT_MULTIPLES = options.get(
+        'value_select_multiples', False)
+
     # 'win_excel_utf8' is only relevant for CSV exports
     if 'win_excel_utf8' in options and export_type != Export.CSV_EXPORT:
         del options['win_excel_utf8']
@@ -207,7 +222,8 @@ def generate_export(export_type, xform, export_id=None, options=None,
         func.__call__(
             temp_file.name, records, username, id_string, filter_query,
             start=start, end=end, dataview=dataview, xform=xform,
-            options=options, columns_with_hxl=columns_with_hxl
+            options=options, columns_with_hxl=columns_with_hxl,
+            total_records=total_records
         )
     except NoRecordsFoundError:
         pass
@@ -270,7 +286,32 @@ def generate_export(export_type, xform, export_id=None, options=None,
 
 def create_export_object(xform, export_type, options):
     export_options = get_export_options(options)
-    return Export(xform=xform, export_type=export_type, options=export_options)
+    return Export(xform=xform, export_type=export_type, options=export_options,
+                  created_on=timezone.now())
+
+
+def check_pending_export(xform, export_type, options,
+                         minutes=getattr(settings, 'PENDING_EXPORT_TIME', 5)):
+    """
+        Check for pending export done within a specific period of time and
+        returns the export
+        :param xform:
+        :param export_type:
+        :param options:
+        :param minutes
+        :return:
+    """
+    created_time = timezone.now() - timedelta(minutes=minutes)
+    export_options_kwargs = get_export_options_query_kwargs(options)
+    export = Export.objects.filter(
+        xform=xform,
+        export_type=export_type,
+        internal_status=Export.PENDING,
+        created_on__gt=created_time,
+        **export_options_kwargs
+    ).last()
+
+    return export
 
 
 def should_create_new_export(xform,
@@ -304,6 +345,8 @@ def should_create_new_export(xform,
         export_type=export_type,
         **export_options_kwargs
     )
+    if options.get(EXPORT_QUERY_KEY) is None:
+        export_query = export_query.exclude(options__has_key=EXPORT_QUERY_KEY)
 
     if export_query.count() == 0 or\
        Export.exports_outdated(xform, export_type, options=options):
@@ -377,9 +420,11 @@ def generate_attachments_zip_export(export_type, username, id_string,
         dataview = DataView.objects.get(pk=options.get("dataview_pk"))
         records = dataview.query_data(dataview, all_data=True)
         instances_ids = [rec.get('_id') for rec in records]
-        attachments = Attachment.objects.filter(instance_id__in=instances_ids)
+        attachments = Attachment.objects.filter(
+            instance_id__in=instances_ids, instance__deleted_at__isnull=True)
     else:
-        attachments = Attachment.objects.filter(instance__xform=xform)
+        attachments = Attachment.objects.filter(
+            instance__xform=xform, instance__deleted_at__isnull=True)
 
     basename = "%s_%s" % (id_string,
                           datetime.now().strftime("%Y_%m_%d_%H_%M_%S"))
@@ -408,14 +453,7 @@ def generate_attachments_zip_export(export_type, username, id_string,
 
     dir_name, basename = os.path.split(export_filename)
 
-    # get or create export object
-    if(export_id):
-        export = Export.objects.get(id=export_id)
-    else:
-        export_options = get_export_options(options)
-        export = Export.objects.create(xform=xform,
-                                       export_type=export_type,
-                                       options=export_options)
+    export = get_or_create_export(export_id, xform, export_type, options)
 
     export.filedir = dir_name
     export.filename = basename
@@ -544,7 +582,8 @@ def generate_osm_export(export_type, username, id_string, export_id=None,
 
     if xform is None:
         xform = XForm.objects.get(user__username=username, id_string=id_string)
-    osm_list = OsmData.objects.filter(instance__xform=xform)
+    osm_list = OsmData.objects.filter(instance__xform=xform,
+                                      instance__deleted_at__isnull=True)
     content = get_combined_osm(osm_list)
 
     basename = "%s_%s" % (id_string,
@@ -761,6 +800,7 @@ def parse_request_export_options(params):
     include_labels = params.get('include_labels', False)
     include_labels_only = params.get('include_labels_only', False)
     include_hxl = params.get('include_hxl', True)
+    value_select_multiples = params.get('value_select_multiples')
 
     if include_labels is not None:
         options['include_labels'] = str_to_bool(include_labels)
@@ -791,5 +831,8 @@ def parse_request_export_options(params):
         options["include_images"] = settings.EXPORT_WITH_IMAGE_DEFAULT
 
     options['win_excel_utf8'] = str_to_bool(params.get('win_excel_utf8'))
+
+    if value_select_multiples and value_select_multiples in boolean_list:
+        options['value_select_multiples'] = str_to_bool(value_select_multiples)
 
     return options

@@ -98,12 +98,13 @@ STATIC_URL = '/static/'
 # Enketo URL
 ENKETO_PROTOCOL = 'https'
 ENKETO_URL = 'https://enketo.ona.io/'
-ENKETO_API_SURVEY_PATH = '/api_v1/survey'
-ENKETO_API_INSTANCE_PATH = '/api_v1/instance'
+ENKETO_API_SURVEY_PATH = '/api_v2/survey'
+ENKETO_API_INSTANCE_PATH = '/api_v2/instance'
 ENKETO_PREVIEW_URL = urljoin(ENKETO_URL, ENKETO_API_SURVEY_PATH + '/preview')
 ENKETO_API_TOKEN = ''
-ENKETO_API_INSTANCE_IFRAME_URL = ENKETO_URL + "api_v1/instance/iframe"
+ENKETO_API_INSTANCE_IFRAME_URL = ENKETO_URL + "api_v2/instance/iframe"
 ENKETO_API_SALT = 'secretsalt'
+VERIFY_SSL = True
 
 # Login URLs
 LOGIN_URL = '/accounts/login/'
@@ -145,7 +146,6 @@ TEMPLATES = [
                 'django.template.context_processors.static',
                 'django.template.context_processors.tz',
                 'django.contrib.messages.context_processors.messages',
-                'readonly.context_processors.readonly',
                 'onadata.apps.main.context_processors.google_analytics',
                 'onadata.apps.main.context_processors.site_name',
             ],
@@ -154,7 +154,7 @@ TEMPLATES = [
 ]
 
 
-MIDDLEWARE_CLASSES = (
+MIDDLEWARE = (
     'onadata.libs.profiling.sql.SqlTimingMiddleware',
     'django.middleware.http.ConditionalGetMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -166,7 +166,6 @@ MIDDLEWARE_CLASSES = (
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'onadata.libs.utils.middleware.HTTPResponseNotAllowedMiddleware',
-    'readonly.middleware.DatabaseReadOnlyMiddleware',
 )
 
 LOCALE_PATHS = (os.path.join(PROJECT_ROOT, 'onadata.apps.main', 'locale'), )
@@ -196,7 +195,6 @@ INSTALLED_APPS = (
     'rest_framework',
     'rest_framework.authtoken',
     'taggit',
-    'readonly',
     'onadata.apps.logger',
     'onadata.apps.viewer',
     'onadata.apps.main',
@@ -411,8 +409,8 @@ def configure_logging(logger, **kwargs):
 after_setup_logger.connect(configure_logging)
 
 GOOGLE_STEP2_URI = 'http://ona.io/gwelcome'
-GOOGLE_CLIENT_ID = '617113120802.onadata.apps.googleusercontent.com'
-GOOGLE_CLIENT_SECRET = '9reM29qpGFPyI8TBuB54Z4fk'
+GOOGLE_OAUTH2_CLIENT_ID = 'REPLACE ME'
+GOOGLE_OAUTH2_CLIENT_SECRET = 'REPLACE ME'
 
 THUMB_CONF = {
     'large': {'size': 1280, 'suffix': '-large'},

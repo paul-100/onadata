@@ -1,15 +1,20 @@
 import csv
-from datetime import datetime, date
 import six
 import uuid
-from zipfile import ZipFile
+
+from celery import current_task
+from datetime import datetime, date
+from zipfile import ZipFile, ZIP_DEFLATED
 
 from django.conf import settings
 from django.core.files.temp import NamedTemporaryFile
+
 from openpyxl.utils.datetime import to_excel
 from openpyxl.workbook import Workbook
+
 from pyxform.question import Question
 from pyxform.section import Section, RepeatingSection
+
 from savReaderWriter import SavWriter
 
 from onadata.apps.logger.models.xform import _encode_for_mongo,\
@@ -26,6 +31,7 @@ from onadata.libs.utils.mongo import _is_invalid_for_mongo,\
 # the bind type of select multiples that we use to compare
 MULTIPLE_SELECT_BIND_TYPE = u"select"
 GEOPOINT_BIND_TYPE = u"geopoint"
+DEFAULT_UPDATE_BATCH = 100
 
 
 def current_site_url(path):
@@ -84,23 +90,23 @@ def get_data_dictionary_from_survey(survey):
     return dd
 
 
-def encode_if_str(row, key, encode_dates=False):
+def encode_if_str(row, key, encode_dates=False, sav_writer=None):
     val = row.get(key)
 
     if isinstance(val, six.string_types):
         return val.encode('utf-8')
 
-    if encode_dates and isinstance(val, datetime):
-        try:
-            return val.strftime('%Y-%m-%dT%H:%M:%S%z').encode('utf-8')
-        except ValueError:
-            raise Exception(u"%s has an invalid datetime format" % (val))
+    if sav_writer and isinstance(val, (datetime, date)):
+        strptime_fmt = '%Y-%m-%dT%H:%M:%S.%f%z' \
+            if isinstance(val, datetime) else '%Y-%m-%d'
 
-    if encode_dates and isinstance(val, date):
-        try:
-            return val.strftime('%Y-%m-%d').encode('utf-8')
-        except ValueError:
-            raise Exception(u"%s has an invalid date format" % (val))
+        if isinstance(val, datetime) and len(val.isoformat()):
+            strptime_fmt = strptime_fmt[:17]
+
+        return sav_writer.spssDateTime(val.isoformat(), strptime_fmt)
+
+    if encode_dates and isinstance(val, (datetime, date)):
+        return val.isoformat()
 
     return val
 
@@ -162,6 +168,44 @@ def dict_to_joined_export(data, index, indices, name, survey, row,
     return output
 
 
+def is_all_numeric(items):
+    """Check if all items on the list are numeric, zero padded numbers will not
+    be considered as numeric.
+
+    :param items: list of values to be checked
+
+    :return boolean:
+    """
+    try:
+        map(float, [i for i in items])
+    except ValueError:
+        return False
+
+    # check for zero padded numbers to be treated as non numeric
+    return not (any([i.startswith('0') and len(i) > 1 and i.find('.') == -1
+                     for i in items if isinstance(i, six.string_types)]))
+
+
+def track_task_progress(additions, total=None):
+    """
+    Updates the current export task with number of submission processed.
+    Updates in batches of settings EXPORT_TASK_PROGRESS_UPDATE_BATCH defaults
+    to 100.
+    :param additions:
+    :param total:
+    :return:
+    """
+    try:
+        if additions % getattr(settings, 'EXPORT_TASK_PROGRESS_UPDATE_BATCH',
+                               DEFAULT_UPDATE_BATCH) == 0:
+            meta = {'progress': additions}
+            if total:
+                meta.update({'total': total})
+            current_task.update_state(state='PROGRESS', meta=meta)
+    except:
+        pass
+
+
 class ExportBuilder(object):
     IGNORED_COLUMNS = [XFORM_ID_STRING, STATUS, ATTACHMENTS, GEOLOCATION,
                        BAMBOO_DATASET_ID, DELETEDAT]
@@ -171,6 +215,7 @@ class ExportBuilder(object):
                     SUBMITTED_BY]
     SPLIT_SELECT_MULTIPLES = True
     BINARY_SELECT_MULTIPLES = False
+    VALUE_SELECT_MULTIPLES = False
 
     # column group delimiters get_value_or_attachment_uri
     GROUP_DELIMITER_SLASH = '/'
@@ -296,8 +341,10 @@ class ExportBuilder(object):
                             current_section, child, sections, select_multiples,
                             gps_fields, encoded_fields, field_delimiter,
                             remove_group_name)
-                elif isinstance(child, Question) and child.bind.get(u"type")\
-                        not in QUESTION_TYPES_TO_EXCLUDE:
+                elif isinstance(child, Question) and \
+                        (child.bind.get(u"type")
+                         not in QUESTION_TYPES_TO_EXCLUDE and
+                         child.type not in QUESTION_TYPES_TO_EXCLUDE):
                     # add to survey_sections
                     if isinstance(child, Question):
                         child_xpath = child.get_abbreviated_xpath()
@@ -381,7 +428,8 @@ class ExportBuilder(object):
         return matches[0]
 
     @classmethod
-    def split_select_multiples(cls, row, select_multiples):
+    def split_select_multiples(cls, row, select_multiples,
+                               select_values=False):
         # for each select_multiple, get the associated data and split it
         for xpath, choices in select_multiples.iteritems():
             # get the data matching this xpath
@@ -391,7 +439,12 @@ class ExportBuilder(object):
                 selections = [
                     u'{0}/{1}'.format(
                         xpath, selection) for selection in data.split()]
-            if not cls.BINARY_SELECT_MULTIPLES:
+            if select_values:
+                row.update(dict(
+                    [(choice, data.split()[selections.index(choice)]
+                      if selections and choice in selections else None)
+                     for choice in choices]))
+            elif not cls.BINARY_SELECT_MULTIPLES:
                 row.update(dict(
                     [(choice, choice in selections if selections else None)
                      for choice in choices]))
@@ -455,7 +508,8 @@ class ExportBuilder(object):
         if self.SPLIT_SELECT_MULTIPLES and\
                 section_name in self.select_multiples:
             row = ExportBuilder.split_select_multiples(
-                row, self.select_multiples[section_name])
+                row, self.select_multiples[section_name],
+                self.VALUE_SELECT_MULTIPLES)
 
         if section_name in self.gps_fields:
             row = ExportBuilder.split_gps_components(
@@ -471,6 +525,10 @@ class ExportBuilder(object):
                 row[elm['xpath']] = ExportBuilder.convert_type(
                     value, elm['type'])
 
+        if SUBMISSION_TIME in row:
+            row[SUBMISSION_TIME] = ExportBuilder.convert_type(
+                row[SUBMISSION_TIME], 'dateTime')
+
         return row
 
     def to_zipped_csv(self, path, data, *args, **kwargs):
@@ -480,6 +538,7 @@ class ExportBuilder(object):
 
         csv_defs = {}
         dataview = kwargs.get('dataview')
+        total_records = kwargs.get('total_records')
 
         for section in self.sections:
             csv_file = NamedTemporaryFile(suffix=".csv")
@@ -518,7 +577,7 @@ class ExportBuilder(object):
         index = 1
         indices = {}
         survey_name = self.survey.name
-        for d in data:
+        for i, d in enumerate(data, start=1):
             # decode mongo section names
             joined_export = dict_to_joined_export(d, index, indices,
                                                   survey_name,
@@ -551,9 +610,10 @@ class ExportBuilder(object):
                             self.pre_process_row(child_row, section),
                             csv_writer, fields)
             index += 1
+            track_task_progress(i, total_records)
 
         # write zipfile
-        with ZipFile(path, 'w') as zip_file:
+        with ZipFile(path, 'w', ZIP_DEFLATED, allowZip64=True) as zip_file:
             for section_name, csv_def in csv_defs.iteritems():
                 csv_file = csv_def['csv_file']
                 csv_file.seek(0)
@@ -594,7 +654,9 @@ class ExportBuilder(object):
             work_sheet.append([data.get(f) for f in fields])
 
         dataview = kwargs.get('dataview')
-        wb = Workbook(optimized_write=True)
+        total_records = kwargs.get('total_records')
+
+        wb = Workbook(write_only=True)
         work_sheets = {}
         # map of section_names to generated_names
         work_sheet_titles = {}
@@ -646,7 +708,7 @@ class ExportBuilder(object):
         index = 1
         indices = {}
         survey_name = self.survey.name
-        for d in data:
+        for i, d in enumerate(data, start=1):
             joined_export = dict_to_joined_export(d, index, indices,
                                                   survey_name,
                                                   self.survey, d,
@@ -678,6 +740,7 @@ class ExportBuilder(object):
                             self.pre_process_row(child_row, section),
                             ws, fields, work_sheet_titles)
             index += 1
+            track_task_progress(i, total_records)
 
         wb.save(filename=path)
 
@@ -690,6 +753,7 @@ class ExportBuilder(object):
         dataview = kwargs.get('dataview')
         xform = kwargs.get('xform')
         options = kwargs.get('options')
+        total_records = kwargs.get('total_records')
         win_excel_utf8 = options.get('win_excel_utf8') if options else False
 
         csv_builder = CSVDataFrameBuilder(
@@ -697,7 +761,8 @@ class ExportBuilder(object):
             self.SPLIT_SELECT_MULTIPLES, self.BINARY_SELECT_MULTIPLES,
             start, end, self.TRUNCATE_GROUP_TITLE, xform,
             self.INCLUDE_LABELS, self.INCLUDE_LABELS_ONLY, self.INCLUDE_IMAGES,
-            self.INCLUDE_HXL, win_excel_utf8=win_excel_utf8
+            self.INCLUDE_HXL, win_excel_utf8=win_excel_utf8,
+            total_records=total_records
         )
 
         csv_builder.export_to(path, dataview=dataview)
@@ -735,8 +800,18 @@ class ExportBuilder(object):
                     if choices is not None and q.get('itemset'):
                         choices = choices.get(q.get('itemset'))
                 _value_labels = {}
+                is_numeric = is_all_numeric([c['name'] for c in choices])
                 for choice in choices:
                     name = choice['name'].strip()
+                    # should skip select multiple and zero padded numbers e.g
+                    # 009 or 09, they should be treated as strings
+                    if q.type != u'select all that apply' and is_numeric:
+                        try:
+                            name = float(name) \
+                                if (not name.startswith('0') and
+                                    float(name) > int(name)) else int(name)
+                        except ValueError:
+                            pass
                     label = self.get_choice_label_from_dict(choice['label'])
                     _value_labels[name] = label.strip()
                 self._sav_value_labels[var_name or q['name']] = _value_labels
@@ -774,6 +849,32 @@ class ExportBuilder(object):
                 'ioUtf8': True
             }
         """
+        def _is_numeric(xpath, element_type, data_dictionary):
+            var_name = xpath_var_names.get(xpath) or xpath
+            if element_type in ['decimal', 'int', 'date']:
+                return True
+            elif element_type == 'string':
+                # check if it is a choice part of multiple choice
+                # type is likely empty string, split multi select is binary
+                element = data_dictionary.get_element(xpath)
+                if element and element.type == '' and value_select_multiples:
+                    return is_all_numeric([element.name])
+                return element and element.type == ''
+            elif element_type != 'select1':
+                return False
+
+            if var_name not in all_value_labels:
+                return False
+
+            # Determine if all select1 choices are numeric in nature
+            # and as such have the field type in spss be numeric
+            choices = all_value_labels[var_name].keys()
+            if len(choices) == 0:
+                return False
+
+            return is_all_numeric(choices)
+
+        value_select_multiples = self.VALUE_SELECT_MULTIPLES
         _var_types = {}
         value_labels = {}
         var_labels = {}
@@ -802,14 +903,21 @@ class ExportBuilder(object):
 
         var_types = dict(
             [(_var_types[element['xpath']],
-                0 if element['type'] in ['decimal', 'int'] else 255)
+                0 if _is_numeric(element['xpath'], element['type'],
+                                 self.dd) else 255)
                 for element in elements] +
             [(_var_types[item],
-                0 if item in ['_id', '_index', '_parent_index'] else 255)
+                0 if item in ['_id', '_index', '_parent_index',
+                              SUBMISSION_TIME] else 255)
                 for item in self.EXTRA_FIELDS]
         )
+        dates = [_var_types[element['xpath']] for element in elements
+                 if element.get('type') == 'date']
+        formats = {d: 'EDATE40' for d in dates}
+        formats['@' + SUBMISSION_TIME] = 'DATETIME40'
 
         return {
+            'formats': formats,
             'varLabels': var_labels,
             'varNames': var_names,
             'varTypes': var_types,
@@ -837,9 +945,12 @@ class ExportBuilder(object):
         return column
 
     def to_zipped_sav(self, path, data, *args, **kwargs):
+        total_records = kwargs.get('total_records')
+
         def write_row(row, csv_writer, fields):
             sav_writer.writerow(
-                [encode_if_str(row, field, True) for field in fields])
+                [encode_if_str(row, field, sav_writer=sav_writer)
+                 for field in fields])
 
         sav_defs = {}
 
@@ -858,7 +969,7 @@ class ExportBuilder(object):
         index = 1
         indices = {}
         survey_name = self.survey.name
-        for d in data:
+        for i, d in enumerate(data, start=1):
             # decode mongo section names
             joined_export = dict_to_joined_export(d, index, indices,
                                                   survey_name,
@@ -891,13 +1002,14 @@ class ExportBuilder(object):
                             self.pre_process_row(child_row, section),
                             sav_writer, fields)
             index += 1
+            track_task_progress(i, total_records)
 
         for section_name, sav_def in sav_defs.iteritems():
             sav_def['sav_writer'].closeSavFile(
                 sav_def['sav_writer'].fh, mode='wb')
 
         # write zipfile
-        with ZipFile(path, 'w') as zip_file:
+        with ZipFile(path, 'w', ZIP_DEFLATED, allowZip64=True) as zip_file:
             for section_name, sav_def in sav_defs.iteritems():
                 sav_file = sav_def['sav_file']
                 sav_file.seek(0)

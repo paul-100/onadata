@@ -1,4 +1,3 @@
-import hashlib
 import sys
 
 from celery import task
@@ -50,12 +49,6 @@ def create_async_export(xform, export_type, query, force_xlsx, options=None):
             if key in Export.EXPORT_OPTION_FIELDS
         }
 
-        if EXPORT_QUERY_KEY in export_options:
-            query_str = '{}'.format(export_options[EXPORT_QUERY_KEY])
-
-            export_options[EXPORT_QUERY_KEY] \
-                = hashlib.md5(query_str).hexdigest()
-
         return Export.objects.create(
             xform=xform, export_type=export_type, options=export_options)
 
@@ -102,7 +95,7 @@ def create_async_export(xform, export_type, query, force_xlsx, options=None):
     return None
 
 
-@task()
+@task(track_started=True)
 def create_xls_export(username, id_string, export_id, **options):
     # we re-query the db instead of passing model objects according to
     # http://docs.celeryproject.org/en/latest/userguide/tasks.html#state
@@ -137,7 +130,7 @@ def create_xls_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def create_csv_export(username, id_string, export_id, **options):
     # we re-query the db instead of passing model objects according to
     # http://docs.celeryproject.org/en/latest/userguide/tasks.html#state
@@ -167,7 +160,7 @@ def create_csv_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def create_kml_export(username, id_string, export_id, **options):
     # we re-query the db instead of passing model objects according to
     # http://docs.celeryproject.org/en/latest/userguide/tasks.html#state
@@ -196,7 +189,7 @@ def create_kml_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def create_osm_export(username, id_string, export_id, **options):
     # we re-query the db instead of passing model objects according to
     # http://docs.celeryproject.org/en/latest/userguide/tasks.html#state
@@ -225,7 +218,7 @@ def create_osm_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def create_zip_export(username, id_string, export_id, **options):
     export = _get_export_object(id=export_id)
     try:
@@ -253,7 +246,7 @@ def create_zip_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def create_csv_zip_export(username, id_string, export_id, **options):
     export = _get_export_object(id=export_id)
     options["extension"] = Export.ZIP_EXPORT
@@ -275,7 +268,7 @@ def create_csv_zip_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def create_sav_zip_export(username, id_string, export_id, **options):
     export = _get_export_object(id=export_id)
     options["extension"] = Export.ZIP_EXPORT
@@ -297,7 +290,7 @@ def create_sav_zip_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def create_external_export(username, id_string, export_id, **options):
     export = get_object_or_404(Export, id=export_id)
 
@@ -324,7 +317,7 @@ def create_external_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def create_google_sheet_export(username, id_string, export_id, **options):
     # we re-query the db instead of passing model objects according to
     # http://docs.celeryproject.org/en/latest/userguide/tasks.html#state
@@ -347,7 +340,7 @@ def create_google_sheet_export(username, id_string, export_id, **options):
         return gen_export.id
 
 
-@task()
+@task(track_started=True)
 def delete_export(export_id):
     try:
         export = _get_export_object(id=export_id)

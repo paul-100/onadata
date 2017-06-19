@@ -537,6 +537,14 @@ class TestProjectViewSet(TestAbstractViewSet):
             self, mock_send_mail):
         # create bob's project and publish a form to it
         self._publish_xls_form_to_project()
+        bobs_project = self.project
+
+        view = ProjectViewSet.as_view({
+            'get': 'retrieve'
+        })
+        # access bob's project initially to cache the forms list
+        request = self.factory.get('/', **self.extra)
+        view(request, pk=bobs_project.pk)
 
         # create an organization with a project
         self._org_create()
@@ -545,15 +553,27 @@ class TestProjectViewSet(TestAbstractViewSet):
             'owner': 'http://testserver/api/v1/users/denoinc',
             'public': False
         })
+        org_project = self.project
+
+        self.assertNotEqual(bobs_project.id, org_project.id)
 
         # try transfering bob's form to an organization project he created
         view = ProjectViewSet.as_view({
             'post': 'forms',
+            'get': 'retrieve'
         })
         post_data = {'formid': self.xform.id}
         request = self.factory.post('/', data=post_data, **self.extra)
         response = view(request, pk=self.project.id)
+
         self.assertEqual(response.status_code, 201)
+
+        # test that cached forms of a source project are cleared. Bob had one
+        # forms initially and now it's been moved to the org project.
+        request = self.factory.get('/', **self.extra)
+        response = view(request, pk=bobs_project.pk)
+        bobs_results = response.data
+        self.assertListEqual(bobs_results.get('forms'), [])
 
     @patch('onadata.apps.api.viewsets.project_viewset.send_mail')
     def test_handle_integrity_error_on_form_transfer(self, mock_send_mail):
@@ -933,6 +953,13 @@ class TestProjectViewSet(TestAbstractViewSet):
         response = self.view(request)
         self.assertEqual(response.status_code, 200)
         self.assertIn(self.project_data, response.data)
+
+        # should show deleted project public project when filtered by owner
+        self.project.soft_delete()
+        request = self.factory.get('/', {'owner': 'alice'}, **self.extra)
+        response = self.view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([], response.data)
 
     def test_project_partial_updates(self):
         self._project_create()
@@ -2014,3 +2041,44 @@ class TestProjectViewSet(TestAbstractViewSet):
         self.assertNotIn({'first_name': u'Bob', 'last_name': u'erama',
                           'is_org': False, 'role': 'readonly',
                           'user': u'alice', 'metadata': {}}, users)
+
+    def test_projects_soft_delete(self):
+        self._project_create()
+
+        view = ProjectViewSet.as_view({
+            'get': 'list',
+            'delete': 'destroy'
+        })
+
+        request = self.factory.get('/', **self.extra)
+        request.user = self.user
+        response = view(request)
+
+        project_id = self.project.pk
+
+        self.assertNotEqual(response.get('Cache-Control'), None)
+        self.assertEqual(response.status_code, 200)
+        serializer = BaseProjectSerializer(self.project,
+                                           context={'request': request})
+
+        self.assertEqual(response.data, [serializer.data])
+        self.assertIn('created_by', response.data[0].keys())
+
+        request = self.factory.delete('/', **self.extra)
+        request.user = self.user
+        response = view(request, pk=project_id)
+        self.assertEqual(response.status_code, 204)
+
+        self.project = Project.objects.get(pk=project_id)
+
+        self.assertIsNotNone(self.project.deleted_at)
+        self.assertTrue('deleted-at' in self.project.name)
+
+        request = self.factory.get('/', **self.extra)
+        request.user = self.user
+        response = view(request)
+
+        self.assertNotEqual(response.get('Cache-Control'), None)
+        self.assertEqual(response.status_code, 200)
+
+        self.assertFalse(serializer.data in response.data)

@@ -35,11 +35,6 @@ def get_export_options_query_kwargs(options):
         if field in options:
             field_value = options.get(field)
 
-            if field == EXPORT_QUERY_KEY:
-                query_str = str(format(field_value))
-
-                field_value = md5hash(query_str)
-
             key = 'options__{}'.format(field)
             options_kwargs[key] = field_value
 
@@ -105,6 +100,7 @@ class Export(models.Model):
         "query",
         "remove_group_name",
         "split_select_multiples",
+        "value_select_multiples",
         "win_excel_utf8"
     ]
 

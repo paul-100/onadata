@@ -32,7 +32,7 @@ from onadata.libs.utils.cache_tools import safe_delete
 from onadata.libs.utils.cache_tools import IS_ORG
 from onadata.libs.utils.cache_tools import PROJ_SUB_DATE_CACHE
 from onadata.libs.utils.cache_tools import PROJ_NUM_DATASET_CACHE,\
-    XFORM_DATA_VERSIONS, DATAVIEW_COUNT
+    XFORM_DATA_VERSIONS, DATAVIEW_COUNT, XFORM_COUNT
 from onadata.libs.utils.dict_tools import get_values_matching_key
 from onadata.libs.utils.timing import calculate_duration
 
@@ -132,9 +132,8 @@ def submission_time():
 def update_xform_submission_count(instance_id, created):
     if created:
         try:
-            instance = Instance.objects.select_related(
-                'xform__user__id'
-            ).get(pk=instance_id)
+            instance = Instance.objects.select_related('xform').only(
+                'xform__user_id', 'date_created').get(pk=instance_id)
         except Instance.DoesNotExist:
             pass
         else:
@@ -159,6 +158,7 @@ def update_xform_submission_count(instance_id, created):
 
             safe_delete('{}{}'.format(XFORM_DATA_VERSIONS, instance.xform_id))
             safe_delete('{}{}'.format(DATAVIEW_COUNT, instance.xform_id))
+            safe_delete('{}{}'.format(XFORM_COUNT, instance.xform_id))
 
 
 def update_xform_submission_count_delete(sender, instance, **kwargs):
@@ -189,6 +189,7 @@ def update_xform_submission_count_delete(sender, instance, **kwargs):
         safe_delete('{}{}'.format(IS_ORG, xform.pk))
         safe_delete('{}{}'.format(XFORM_DATA_VERSIONS, xform.pk))
         safe_delete('{}{}'.format(DATAVIEW_COUNT, xform.pk))
+        safe_delete('{}{}'.format(XFORM_COUNT, xform.pk))
 
         if xform.instances.exclude(geom=None).count() < 1:
             xform.instances_with_geopoints = False
@@ -213,9 +214,8 @@ def update_project_date_modified(instance_id, created):
     # update the date modified field of the project which will change
     # the etag value of the projects endpoint
     try:
-        instance = Instance.objects.select_related(
-            'xform__project__date_modified'
-        ).get(pk=instance_id)
+        instance = Instance.objects.select_related('xform__project').only(
+            'xform__project__date_modified').get(pk=instance_id)
     except Instance.DoesNotExist:
         pass
     else:
@@ -451,7 +451,8 @@ class Instance(models.Model, InstanceBaseClass):
         self._set_json()
         self._set_survey_type()
         self._set_uuid()
-        self.version = self.xform.version
+        self.version = self.json.get(VERSION, self.xform.version)
+
         super(Instance, self).save(*args, **kwargs)
 
     def set_deleted(self, deleted_at=timezone.now()):

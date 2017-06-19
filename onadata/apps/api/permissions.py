@@ -13,7 +13,7 @@ from onadata.libs.permissions import ReadOnlyRoleNoDownload
 from onadata.apps.api.tools import get_user_profile_or_none, \
     check_inherit_permission_from_project
 
-from onadata.apps.logger.models import XForm
+from onadata.apps.logger.models import XForm, Instance
 from onadata.apps.logger.models import Project
 from onadata.apps.logger.models import DataView
 
@@ -55,6 +55,30 @@ class ViewDjangoObjectPermissions(DjangoObjectPermissions):
         'PATCH': ['%(app_label)s.change_%(model_name)s'],
         'DELETE': ['%(app_label)s.delete_%(model_name)s'],
     }
+
+
+class ExportDjangoObjectPermission(IsAuthenticated,
+                                   AlternateHasObjectPermissionMixin,
+                                   ViewDjangoObjectPermissions):
+
+    def has_permission(self, request, view):
+        is_authenticated = (
+            request and request.user and request.user.is_authenticated()
+        )
+
+        if view.action == 'destroy' and is_authenticated:
+            return request.user.has_perms(['logger.delete_xform'])
+
+        return super(ExportDjangoObjectPermission, self).has_permission(
+            request, view
+        )
+
+    def has_object_permission(self, request, view, obj):
+        model_cls = XForm
+        user = request.user
+
+        return self._has_object_permission(request, model_cls, user,
+                                           obj.xform)
 
 
 class DjangoObjectPermissionsAllowAnon(DjangoObjectPermissions):
@@ -190,6 +214,14 @@ class MetaDataObjectPermissions(AlternateHasObjectPermissionMixin,
         model_cls = obj.content_object.__class__
         user = request.user
 
+        # xform instance object perms are not added explicitly to user perms
+        if model_cls == Instance:
+            model_cls = XForm
+            xform_obj = obj.content_object.xform
+
+            return self._has_object_permission(request, model_cls, user,
+                                               xform_obj)
+
         return self._has_object_permission(request, model_cls, user,
                                            obj.content_object)
 
@@ -313,3 +345,23 @@ class OrganizationProfilePermissions(DjangoObjectPermissionsAllowAnon):
             return super(OrganizationProfilePermissions,
                          self).has_object_permission(
                 request=request, view=view, obj=obj)
+
+
+class OpenDataViewSetPermissions(IsAuthenticated,
+                                 AlternateHasObjectPermissionMixin,
+                                 DjangoObjectPermissionsAllowAnon):
+
+    def has_permission(self, request, view):
+        if request.user.is_anonymous() and view.action in ['schema', 'data']:
+            return True
+
+        return super(OpenDataViewSetPermissions, self).has_permission(
+            request, view
+        )
+
+    def has_object_permission(self, request, view, obj):
+        model_cls = XForm
+        user = request.user
+
+        return self._has_object_permission(request, model_cls, user,
+                                           obj.content_object)

@@ -15,7 +15,8 @@ from pyxform.xls2json import parse_file_to_json
 from onadata.apps.logger.models.xform import XForm
 from onadata.apps.logger.xform_instance_parser import XLSFormError
 from onadata.libs.utils.model_tools import set_uuid
-from onadata.libs.utils.cache_tools import PROJ_FORMS_CACHE, safe_delete
+from onadata.libs.utils.cache_tools import (
+    PROJ_FORMS_CACHE, PROJ_BASE_FORMS_CACHE, safe_delete)
 from onadata.libs.utils.model_tools import get_columns_with_hxl
 
 
@@ -141,6 +142,7 @@ def set_object_permissions(sender, instance=None, created=False, **kwargs):
     if instance.project:
         # clear cache
         safe_delete('{}{}'.format(PROJ_FORMS_CACHE, instance.project.pk))
+        safe_delete('{}{}'.format(PROJ_BASE_FORMS_CACHE, instance.project.pk))
 
     # seems the super is not called, have to get xform from here
     xform = XForm.objects.get(pk=instance.pk)
@@ -153,8 +155,8 @@ def set_object_permissions(sender, instance=None, created=False, **kwargs):
         if instance.created_by and instance.user != instance.created_by:
             OwnerRole.add(instance.created_by, xform)
 
-        from onadata.libs.utils.project_utils import set_project_perms_to_xform
-        set_project_perms_to_xform(xform, instance.project)
+        from onadata.libs.utils.project_utils import set_project_perms_to_xform_async  # noqa
+        set_project_perms_to_xform_async.delay(xform.pk, instance.project.pk)
 
     if hasattr(instance, 'has_external_choices') \
             and instance.has_external_choices:
